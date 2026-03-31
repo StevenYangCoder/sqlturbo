@@ -363,9 +363,9 @@ func (s *Service) runRemoteScript(ctx context.Context, client *remote.Client, sc
 	}
 }
 
-// downloadRemoteLog 会把远程 info.log 下载到本地 data/logs 目录。
+// downloadRemoteLog 会把远程 info.log 下载到本地 logs 目录。
 func (s *Service) downloadRemoteLog(client *remote.Client, database domainconfig.Database, emit func(domainruntime.Step, string, string, bool)) error {
-	localPath := filepath.Join(s.rootDir, "data", "logs", database.ID+"_info.log")
+	localPath := filepath.Join(s.rootDir, "logs", database.ID+"_info.log")
 	remotePath := path.Join(database.WorkPath, "info.log")
 
 	return client.DownloadFile(remotePath, localPath, func(written int64, total int64) {

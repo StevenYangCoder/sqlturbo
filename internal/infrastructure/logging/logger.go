@@ -17,7 +17,7 @@ type Manager struct {
 
 // NewManager 会初始化 info/error 两类日志文件。
 func NewManager(rootDir string) (*Manager, error) {
-	logDir := filepath.Join(rootDir, "data", "logs")
+	logDir := filepath.Join(rootDir, "logs")
 	if err := os.MkdirAll(logDir, 0o755); err != nil {
 		return nil, fmt.Errorf("创建日志目录失败：%w", err)
 	}

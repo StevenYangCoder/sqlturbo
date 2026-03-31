@@ -113,7 +113,7 @@ func (m dashboardModel) View() string {
 	if m.done {
 		builder.WriteString("\n")
 		if m.runErr != nil {
-			builder.WriteString("存在执行失败任务，详情请查看 data/logs 下日志。\n")
+			builder.WriteString("存在执行失败任务，详情请查看 logs 下日志。\n")
 		}
 		builder.WriteString("按 Enter 关闭当前终端。\n")
 	}

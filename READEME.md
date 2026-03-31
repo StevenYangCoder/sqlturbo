@@ -32,7 +32,7 @@
 
 1. 确保配置文件中的配置正确，如果没有配置，或者配置文件格式错误，直接报错。
 
-2. 日志文件夹：`./data/logs/`。需要区分info日志和error日志。
+2. 日志文件夹：`./logs/`。需要区分info日志和error日志。
 
 3. 初始化需要获取当前用户的电脑IP、Mac地址、公网IP；如果有多个电脑IP，多个数据都需要获取到。然后按照如下格式存储在`./data/history`中，如果存在多个数据，则就保存多个，如果没有就只保存有的数据，格式如下：
 
@@ -94,7 +94,7 @@ Space选择和取消，Enter执行，默认选择上一次执行的数据库
 
 17. 开始执行 `sql_execute_xx.sh`；命令：`export PATH=$PATH:/opt/mysql/bin && ./sql_execute_mysql.sh -ip=192.168.7.97 -port=3306 -user=root -password=SGSPDEV1234 -schema=SGSPDEV_V2`；根据配置文件中的 `env_path`，先追加 PATH，再执行脚本。
 
-18. 执行所有脚步后，工作目录会存在日志文件`info.log`，下载执行日志到`./data/logs`中。命名改为数据库ID_info.log。
+18. 执行所有脚步后，工作目录会存在日志文件`info.log`，下载执行日志到`./logs`中。命名改为数据库ID_info.log。
 
 19. 删除最开始创建的锁文件，释放锁。当前数据库执行完成。
 

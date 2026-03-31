@@ -25,7 +25,7 @@ var embeddedData embed.FS
 // EnsureRuntimeData 会在第一次运行时初始化 data 目录中的模板文件。
 func EnsureRuntimeData(rootDir string) ([]string, error) {
 	dataDir := filepath.Join(rootDir, "data")
-	logsDir := filepath.Join(dataDir, "logs")
+	logsDir := filepath.Join(rootDir, "logs")
 
 	if err := os.MkdirAll(logsDir, 0o755); err != nil {
 		return nil, fmt.Errorf("创建data目录失败：%w", err)
