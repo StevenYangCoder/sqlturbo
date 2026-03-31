@@ -1,6 +1,7 @@
 package remote
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"errors"
@@ -10,6 +11,7 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	domainconfig "sqlturbo/internal/domain/config"
@@ -200,6 +202,96 @@ func (c *Client) RunCommand(ctx context.Context, command string) error {
 				summarizeCommandOutput(stdout.String()),
 				summarizeCommandOutput(stderr.String()),
 			)
+		}
+		return nil
+	case <-ctx.Done():
+		_ = session.Close()
+		return ctx.Err()
+	}
+}
+
+// RunCommandStream 会流式读取远程命令输出，并按行回调。
+func (c *Client) RunCommandStream(ctx context.Context, command string, onLine func(line string)) error {
+	session, err := c.sshClient.NewSession()
+	if err != nil {
+		return fmt.Errorf("创建SSH会话失败：%w", err)
+	}
+	defer session.Close()
+
+	stdoutPipe, err := session.StdoutPipe()
+	if err != nil {
+		return fmt.Errorf("创建标准输出管道失败：%w", err)
+	}
+	stderrPipe, err := session.StderrPipe()
+	if err != nil {
+		return fmt.Errorf("创建标准错误管道失败：%w", err)
+	}
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	var scanErr error
+	var scanErrMutex sync.Mutex
+
+	scan := func(reader io.Reader, out *bytes.Buffer) {
+		defer func() {
+			_ = recover()
+		}()
+
+		scanner := bufio.NewScanner(reader)
+		scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+		for scanner.Scan() {
+			line := scanner.Text()
+			out.WriteString(line)
+			out.WriteByte('\n')
+			if onLine != nil {
+				onLine(line)
+			}
+		}
+		if err := scanner.Err(); err != nil {
+			scanErrMutex.Lock()
+			if scanErr == nil {
+				scanErr = err
+			}
+			scanErrMutex.Unlock()
+		}
+	}
+
+	if err := session.Start(command); err != nil {
+		return fmt.Errorf("启动远程命令失败：%w", err)
+	}
+
+	var waitGroup sync.WaitGroup
+	waitGroup.Add(2)
+	go func() {
+		defer waitGroup.Done()
+		scan(stdoutPipe, &stdout)
+	}()
+	go func() {
+		defer waitGroup.Done()
+		scan(stderrPipe, &stderr)
+	}()
+
+	waitCh := make(chan error, 1)
+	go func() {
+		waitCh <- session.Wait()
+	}()
+
+	select {
+	case waitErr := <-waitCh:
+		waitGroup.Wait()
+		if waitErr != nil {
+			return fmt.Errorf(
+				"执行远程命令失败：%w；命令：%s；stdout：%s；stderr：%s",
+				waitErr,
+				command,
+				summarizeCommandOutput(stdout.String()),
+				summarizeCommandOutput(stderr.String()),
+			)
+		}
+		scanErrMutex.Lock()
+		defer scanErrMutex.Unlock()
+		if scanErr != nil {
+			return fmt.Errorf("读取远程命令输出失败：%w", scanErr)
 		}
 		return nil
 	case <-ctx.Done():

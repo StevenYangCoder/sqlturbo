@@ -339,9 +339,17 @@ func normalizeScriptContent(content []byte) []byte {
 func (s *Service) runRemoteScript(ctx context.Context, client *remote.Client, scriptName string, command string, emit func(domainruntime.Step, string, string, bool)) error {
 	errCh := make(chan error, 1)
 	startAt := time.Now()
+	currentSQLFile := ""
+	var sqlFileMutex sync.RWMutex
 
 	go func() {
-		errCh <- client.RunCommand(ctx, command)
+		errCh <- client.RunCommandStream(ctx, command, func(line string) {
+			if fileName := parseExecutingSQLFromLine(line); fileName != "" {
+				sqlFileMutex.Lock()
+				currentSQLFile = fileName
+				sqlFileMutex.Unlock()
+			}
+		})
 	}()
 
 	ticker := time.NewTicker(time.Second)
@@ -356,11 +364,32 @@ func (s *Service) runRemoteScript(ctx context.Context, client *remote.Client, sc
 			emit(domainruntime.StepExecuting, "远程脚本执行完成", fmt.Sprintf("%ds", int(time.Since(startAt).Seconds())), false)
 			return nil
 		case <-ticker.C:
-			emit(domainruntime.StepExecuting, "正在执行["+scriptName+"]", fmt.Sprintf("%ds", int(time.Since(startAt).Seconds())), false)
+			sqlFileMutex.RLock()
+			latestSQL := currentSQLFile
+			sqlFileMutex.RUnlock()
+			if latestSQL != "" {
+				emit(domainruntime.StepExecuting, "正在执行["+latestSQL+"]", fmt.Sprintf("%ds", int(time.Since(startAt).Seconds())), false)
+			} else {
+				emit(domainruntime.StepExecuting, "正在执行["+scriptName+"]", fmt.Sprintf("%ds", int(time.Since(startAt).Seconds())), false)
+			}
 		case <-ctx.Done():
 			return ctx.Err()
 		}
 	}
+}
+
+func parseExecutingSQLFromLine(line string) string {
+	line = strings.TrimSpace(line)
+	if line == "" {
+		return ""
+	}
+	if strings.HasPrefix(line, "正在执行:") {
+		return strings.TrimSpace(strings.TrimPrefix(line, "正在执行:"))
+	}
+	if strings.HasPrefix(line, "正在执行：") {
+		return strings.TrimSpace(strings.TrimPrefix(line, "正在执行："))
+	}
+	return ""
 }
 
 // downloadRemoteLog 会把远程 info.log 下载到本地 logs 目录。
