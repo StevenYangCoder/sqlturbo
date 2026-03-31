@@ -180,6 +180,11 @@ func (c *Client) RunCommand(ctx context.Context, command string) error {
 	}
 	defer session.Close()
 
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	session.Stdout = &stdout
+	session.Stderr = &stderr
+
 	errCh := make(chan error, 1)
 	go func() {
 		errCh <- session.Run(command)
@@ -188,13 +193,32 @@ func (c *Client) RunCommand(ctx context.Context, command string) error {
 	select {
 	case err := <-errCh:
 		if err != nil {
-			return fmt.Errorf("执行远程命令失败：%w", err)
+			return fmt.Errorf(
+				"执行远程命令失败：%w；命令：%s；stdout：%s；stderr：%s",
+				err,
+				command,
+				summarizeCommandOutput(stdout.String()),
+				summarizeCommandOutput(stderr.String()),
+			)
 		}
 		return nil
 	case <-ctx.Done():
 		_ = session.Close()
 		return ctx.Err()
 	}
+}
+
+func summarizeCommandOutput(content string) string {
+	content = strings.TrimSpace(content)
+	if content == "" {
+		return "(empty)"
+	}
+
+	const maxLen = 4000
+	if len(content) <= maxLen {
+		return content
+	}
+	return content[:maxLen] + "...(truncated)"
 }
 
 // uploadStream 会把输入流上传到远程文件。

@@ -393,16 +393,10 @@ func buildExecutionCommand(database domainconfig.Database, scriptName string) st
 
 	parts := []string{fmt.Sprintf("cd %s", shellQuote(database.WorkPath))}
 	if envPath := strings.TrimSpace(database.RuntimePathDirectory()); envPath != "" {
-		parts = append(parts, fmt.Sprintf("export PATH=\"$PATH:%s\"", escapeForDoubleQuotes(envPath)))
+		parts = append(parts, envPath)
 	}
 	parts = append(parts, fmt.Sprintf("./%s %s", scriptName, strings.Join(quotedArgs, " ")))
 	return strings.Join(parts, " && ")
-}
-
-func escapeForDoubleQuotes(value string) string {
-	value = strings.ReplaceAll(value, `\`, `\\`)
-	value = strings.ReplaceAll(value, `"`, `\"`)
-	return value
 }
 
 // shellQuote 会把参数包装成安全的单引号形式，避免远程 shell 解析错误。
