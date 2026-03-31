@@ -3,7 +3,6 @@ package tui
 import (
 	"context"
 	"fmt"
-	"runtime"
 	"strings"
 
 	domainconfig "sqlturbo/internal/domain/config"
@@ -39,7 +38,7 @@ func RunDashboard(ctx context.Context, databases []domainconfig.Database, runner
 	model := dashboardModel{
 		order:        make([]string, 0, len(databases)),
 		status:       make(map[string]domainruntime.StatusUpdate, len(databases)),
-		waitForEnter: runtime.GOOS == "windows",
+		waitForEnter: true,
 	}
 
 	for _, database := range databases {
