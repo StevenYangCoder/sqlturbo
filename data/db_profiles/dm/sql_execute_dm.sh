@@ -1,4 +1,4 @@
-﻿#!/bin/sh
+﻿#!/bin/bash
 
 # 设置环境格式为utf-8
 export LANG=en_US.UTF-8
