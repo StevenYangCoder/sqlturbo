@@ -23,7 +23,7 @@ type hostSnapshotResult struct {
 	err      error
 }
 
-// Run 会启动完整应用流程，串联配置、历史、交互与执行模块。
+// Run 负责串联配置加载、交互选择和执行流程。
 func Run(ctx context.Context) error {
 	rootDir, err := executableDir()
 	if err != nil {
@@ -44,7 +44,7 @@ func Run(ctx context.Context) error {
 	logger := logManager.Logger()
 	logger.Info("程序启动", "版本号", version.Version, "构建时间", version.BuildTime)
 	if len(createdFiles) > 0 {
-		logger.Info("首启初始化运行目录", "文件", createdFiles)
+		logger.Info("首次初始化运行目录", "文件", createdFiles)
 	}
 
 	appConfig, configPath, err := infraConfig.LoadAppConfig(rootDir)
@@ -57,15 +57,15 @@ func Run(ctx context.Context) error {
 	historyPath := filepath.Join(rootDir, "data", "history")
 	previousSnapshot, err := domainhistory.ReadSnapshot(historyPath)
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
-		logger.Warn("读取history失败，将按首次执行处理", "错误", err)
+		logger.Warn("读取 history 失败，将按首次执行处理", "错误", err)
 	}
 
 	snapshotCh := make(chan hostSnapshotResult, 1)
 	go func() {
-		snapshot, err := system.CollectHostSnapshot(ctx, logger)
+		snapshot, collectErr := system.CollectHostSnapshot(ctx, logger)
 		snapshotCh <- hostSnapshotResult{
 			snapshot: snapshot,
-			err:      err,
+			err:      collectErr,
 		}
 	}()
 
@@ -75,25 +75,26 @@ func Run(ctx context.Context) error {
 		return err
 	}
 
-	result := <-snapshotCh
-	snapshot := result.snapshot
-	if result.err != nil {
-		logger.Warn("采集主机信息失败，继续使用可获取的数据", "错误", result.err)
-	}
-
-	snapshot.SelectedIDs = selectedIDs
-	if err := domainhistory.WriteSnapshot(historyPath, snapshot); err != nil {
-		logger.Error("写入history失败", "错误", err)
-		return err
-	}
-
 	selectedDatabases := appConfig.Application.FilterSelected(selectedIDs)
 	for _, database := range selectedDatabases {
 		logger.Info("数据库已加入执行队列", slog.String("数据库ID", database.ID))
 	}
 
-	service := executor.NewService(rootDir, appConfig.Application, snapshot, logger)
+	// 先打开执行详情页，再在 runner 内等待主机信息采集，避免回车后空等。
 	runErr, err := tui.RunDashboard(ctx, selectedDatabases, func(ctx context.Context, notify func(domainruntime.StatusUpdate)) error {
+		result := <-snapshotCh
+		snapshot := result.snapshot
+		if result.err != nil {
+			logger.Warn("采集主机信息失败，继续使用可获取的数据", "错误", result.err)
+		}
+
+		snapshot.SelectedIDs = selectedIDs
+		if writeErr := domainhistory.WriteSnapshot(historyPath, snapshot); writeErr != nil {
+			logger.Error("写入 history 失败", "错误", writeErr)
+			return writeErr
+		}
+
+		service := executor.NewService(rootDir, appConfig.Application, snapshot, logger)
 		return service.Run(ctx, selectedDatabases, notify)
 	})
 	if err != nil {

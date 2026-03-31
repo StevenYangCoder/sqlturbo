@@ -121,8 +121,6 @@ func (m selectorModel) View() string {
 
 		builder.WriteString(fmt.Sprintf("%s [%s] %s\n", cursor, check, item.Label))
 	}
-
-	builder.WriteString("\n按 Esc 或 Ctrl+C 取消。\n")
 	return builder.String()
 }
 

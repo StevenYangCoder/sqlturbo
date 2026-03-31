@@ -96,11 +96,8 @@ func (m dashboardModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m dashboardModel) View() string {
 	var builder strings.Builder
 
-	if m.done {
-		builder.WriteString("所有数据库任务已结束。\n\n")
-	} else {
-		builder.WriteString("数据库执行中，界面会实时刷新当前进度。\n\n")
-	}
+	builder.WriteString("\n数据库执行中，界面会实时刷新当前进度。\n")
+	builder.WriteString("执行详情如下：\n\n")
 
 	for _, id := range m.order {
 		status := m.status[id]
