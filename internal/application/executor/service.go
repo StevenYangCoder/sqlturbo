@@ -12,10 +12,10 @@ import (
 	"sync"
 	"time"
 
-	projectassets "sqlturbo"
 	domainconfig "sqlturbo/internal/domain/config"
 	"sqlturbo/internal/domain/history"
 	domainruntime "sqlturbo/internal/domain/runtime"
+	infraAssets "sqlturbo/internal/infrastructure/assets"
 	"sqlturbo/internal/infrastructure/remote"
 )
 
@@ -136,7 +136,7 @@ func (s *Service) runOne(ctx context.Context, database domainconfig.Database, no
 		return err
 	}
 
-	profileFiles, err := projectassets.ListProfileFiles(database.ProfileDirectory())
+	profileFiles, err := infraAssets.ListProfileFiles(database.ProfileDirectory())
 	if err != nil {
 		emit(domainruntime.StepFailed, err.Error(), "-", true)
 		return err
@@ -311,7 +311,7 @@ func (s *Service) uploadFiles(client *remote.Client, database domainconfig.Datab
 	return nil
 }
 
-func (s *Service) uploadProfileFiles(client *remote.Client, database domainconfig.Database, files []projectassets.ProfileFile, emit func(domainruntime.Step, string, string, bool)) error {
+func (s *Service) uploadProfileFiles(client *remote.Client, database domainconfig.Database, files []infraAssets.ProfileFile, emit func(domainruntime.Step, string, string, bool)) error {
 	for _, profileFile := range files {
 		remotePath := path.Join(database.WorkPath, profileFile.Name)
 		content := normalizeScriptContent(profileFile.Content)

@@ -3,6 +3,7 @@ package tui
 import (
 	"context"
 	"fmt"
+	"runtime"
 	"strings"
 
 	domainconfig "sqlturbo/internal/domain/config"
@@ -26,17 +27,19 @@ type finishedMsg struct {
 
 // dashboardModel 是运行态 TUI 的页面模型。
 type dashboardModel struct {
-	order  []string
-	status map[string]domainruntime.StatusUpdate
-	done   bool
-	runErr error
+	order        []string
+	status       map[string]domainruntime.StatusUpdate
+	done         bool
+	runErr       error
+	waitForEnter bool
 }
 
 // RunDashboard 会启动运行态界面，并在全部结束后等待用户回车关闭。
 func RunDashboard(ctx context.Context, databases []domainconfig.Database, runner RunnerFunc) (error, error) {
 	model := dashboardModel{
-		order:  make([]string, 0, len(databases)),
-		status: make(map[string]domainruntime.StatusUpdate, len(databases)),
+		order:        make([]string, 0, len(databases)),
+		status:       make(map[string]domainruntime.StatusUpdate, len(databases)),
+		waitForEnter: runtime.GOOS == "windows",
 	}
 
 	for _, database := range databases {
@@ -80,10 +83,15 @@ func (m dashboardModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case finishedMsg:
 		m.done = true
 		m.runErr = message.runErr
+		if !m.waitForEnter {
+			return m, tea.Quit
+		}
 	case tea.KeyMsg:
 		switch message.String() {
+		case "ctrl+c", "esc":
+			return m, tea.Quit
 		case "enter":
-			if m.done {
+			if m.done && m.waitForEnter {
 				return m, tea.Quit
 			}
 		}
@@ -115,7 +123,9 @@ func (m dashboardModel) View() string {
 		if m.runErr != nil {
 			builder.WriteString("存在执行失败任务，详情请查看 logs 下日志。\n")
 		}
-		builder.WriteString("按 Enter 关闭当前终端。\n")
+		if m.waitForEnter {
+			builder.WriteString("按 Enter 退出程序。\n")
+		}
 	}
 
 	return builder.String()

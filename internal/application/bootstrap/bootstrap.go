@@ -7,10 +7,10 @@ import (
 	"os"
 	"path/filepath"
 
-	projectassets "sqlturbo"
 	"sqlturbo/internal/application/executor"
 	domainhistory "sqlturbo/internal/domain/history"
 	domainruntime "sqlturbo/internal/domain/runtime"
+	infraAssets "sqlturbo/internal/infrastructure/assets"
 	infraConfig "sqlturbo/internal/infrastructure/config"
 	"sqlturbo/internal/infrastructure/logging"
 	"sqlturbo/internal/infrastructure/system"
@@ -30,7 +30,7 @@ func Run(ctx context.Context) error {
 		return err
 	}
 
-	createdFiles, err := projectassets.EnsureRuntimeData(rootDir)
+	createdFiles, err := infraAssets.EnsureRuntimeData(rootDir)
 	if err != nil {
 		return err
 	}

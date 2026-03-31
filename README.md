@@ -1,4 +1,4 @@
-﻿# `SqlTurbo`--SQL执行工具
+# `SqlTurbo`--SQL执行工具
 
 # 一、背景
 
@@ -117,7 +117,7 @@ Space选择和取消，Enter执行，默认选择上一次执行的数据库
 
     百分比：只有文件上传和下载时才展示。在文件执行时，现在当前脚本执行的时间，单位秒。
 
-22. 所有数据库都执行完成后，回车即可关闭当前终端。
+22. 所有数据库都执行完成后，Windows 终端下等待用户回车后退出程序；macOS、Linux 下直接退出。终端窗口是否关闭取决于启动它的终端环境。
 
 
 
@@ -126,7 +126,11 @@ Space选择和取消，Enter执行，默认选择上一次执行的数据库
 Bash构建命令：
 
 ```bash
- BUILD_TIME="$(date '+%Y-%m-%dT%H:%M:%S%z')" GOOS=windows GOARCH=amd64 go build -trimpath -ldflags "-X sqlturbo/internal/version.BuildTime=${BUILD_TIME}" -o ./sqlturbo.exe ./cmd/sqlturbo
+# win
+BUILD_TIME="$(date '+%Y-%m-%dT%H:%M:%S%z')" GOOS=windows GOARCH=amd64 go build -trimpath -ldflags "-X sqlturbo/internal/version.BuildTime=${BUILD_TIME}" -o ./sqlturbo.exe ./cmd/sqlturbo
+
+# mac
+BUILD_TIME="$(date '+%Y-%m-%dT%H:%M:%S%z')" GOOS=darwin GOARCH=amd64 go build -trimpath -ldflags "-X sqlturbo/internal/version.BuildTime=${BUILD_TIME}" -o ./sqlturbo ./cmd/sqlturbo
 ```
 
 cmd构建命令：

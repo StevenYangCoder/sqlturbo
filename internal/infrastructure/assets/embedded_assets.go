@@ -1,4 +1,4 @@
-package projectassets
+package assets
 
 import (
 	"embed"
@@ -28,7 +28,7 @@ func EnsureRuntimeData(rootDir string) ([]string, error) {
 	logsDir := filepath.Join(rootDir, "logs")
 
 	if err := os.MkdirAll(logsDir, 0o755); err != nil {
-		return nil, fmt.Errorf("创建data目录失败：%w", err)
+		return nil, fmt.Errorf("创建日志目录失败：%w", err)
 	}
 
 	created := make([]string, 0, 1)
@@ -51,6 +51,10 @@ func ensureEmbeddedFile(target string, embeddedPath string) (bool, error) {
 		return false, nil
 	} else if !os.IsNotExist(err) {
 		return false, fmt.Errorf("检查模板文件失败：%w", err)
+	}
+
+	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+		return false, fmt.Errorf("创建模板目录失败：%w", err)
 	}
 
 	content, err := fs.ReadFile(embeddedData, embeddedPath)

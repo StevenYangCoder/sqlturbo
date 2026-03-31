@@ -1,0 +1,49 @@
+application:
+  # 当存在锁文件时，需要等待几秒再重新查看是否有锁。必须大于1，如果不配置或者为0，或者小于1，均为默认值1，单位秒。
+  wait_time: 5
+  # 当存在锁文件时，需要重试几次查看锁是否释放。必须大于等于0，如果不配置或者小于0，则默认值0，即不重试。
+  retry_times: 5
+  # 工具名称
+  sql_turbo:
+    - id: dm_test_01 # 数据库ID
+      group: test    # 分组，支持针对数据库分组，可以按照分组执行
+      db_type: dm # 数据库类型，当前支持 mysql、dm
+      db_host: 192.168.10.10 # 数据库IP
+      db_port: 5336 # 数据库端口
+      db_username: root # 数据库连接用户名
+      db_password: password1234 # 数据库连接密码
+      db_schema: schema_name # 数据库 schema 名称
+      ssh_host: 192.168.10.14 # 目标服务器IP
+      ssh_port: 22 # 目标服务器 SSH 端口
+      ssh_username: root # 目标服务器 SSH 用户名，可选；不配置时默认回退到 db_username
+      ssh_password: Aa!111111 # 目标服务器 SSH 密码
+      work_path: /data/sqlturbo/dm/dm_test_01/ # SQL 执行工作目录
+      env_path: /opt/dmdbms/bin # 运行前追加到 PATH 的远程目录，可选
+    - id: dm_test_02 # 数据库ID
+      group: test
+      db_type: dm # 数据库类型，当前支持 mysql、dm
+      db_host: 192.168.10.10 # 数据库IP
+      db_port: 5336 # 数据库端口
+      db_username: root # 数据库连接用户名
+      db_password: password1234 # 数据库连接密码
+      db_schema: schema_name_02 # 数据库 schema 名称
+      ssh_host: 192.168.10.14 # 目标服务器IP
+      ssh_port: 22 # 目标服务器 SSH 端口
+      ssh_username: root # 目标服务器 SSH 用户名，可选；不配置时默认回退到 db_username
+      ssh_password: Aa!111111 # 目标服务器 SSH 密码
+      work_path: /data/sqlturbo/dm/dm_test_02/ # SQL 执行工作目录
+      env_path: /opt/dmdbms/bin # 运行前追加到 PATH 的远程目录，可选
+    - id: mysql_test_01 # 数据库ID
+      group: dev
+      db_type: mysql # 数据库类型，当前支持 mysql、dm
+      db_host: 192.168.10.10 # 数据库IP
+      db_port: 3306 # 数据库端口
+      db_username: root # 数据库连接用户名
+      db_password: password1234 # 数据库连接密码
+      db_schema: schema_name # 数据库 schema 名称
+      ssh_host: 192.168.10.14 # 目标服务器IP
+      ssh_port: 22 # 目标服务器 SSH 端口
+      ssh_username: root # 目标服务器 SSH 用户名，可选；不配置时默认回退到 db_username
+      ssh_password: Aa!111111 # 目标服务器 SSH 密码
+      work_path: /data/sqlturbo/mysql/mysql_test_01/ # SQL 执行工作目录
+      env_path: /opt/mysql/bin # 运行前追加到 PATH 的远程目录，可选
