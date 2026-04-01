@@ -117,32 +117,50 @@ Space选择和取消，Enter执行，默认选择上一次执行的数据库
 
     百分比：只有文件上传和下载时才展示。在文件执行时，现在当前脚本执行的时间，单位秒。
 
-22. 所有数据库都执行完成后，等待用户回车后退出程序。终端窗口是否关闭取决于启动它的终端环境。
+22. 所有数据库都执行完成后，Windows 终端下等待用户回车后退出程序；macOS、Linux 下直接退出。终端窗口是否关闭取决于启动它的终端环境。
 
 
 
-# 四、构建
+# 四、构建与使用
 
 Bash构建命令：
 
 ```bash
 # win
-BUILD_TIME="$(date '+%Y-%m-%dT%H:%M:%S%z')" GOOS=windows GOARCH=amd64 go build -trimpath -ldflags "-X sqlturbo/internal/version.BuildTime=${BUILD_TIME}" -o ./sqlturbo.exe ./cmd/sqlturbo
+BUILD_TIME="$(date '+%Y-%m-%dT%H:%M:%S%z')" GOOS=windows GOARCH=amd64 go build -trimpath -ldflags "-X sqlturbo/internal/version.BuildTime=${BUILD_TIME}" -o ./sqlturbo-win-amd64.exe ./cmd/sqlturbo
 
 # mac
-BUILD_TIME="$(date '+%Y-%m-%dT%H:%M:%S%z')" GOOS=darwin GOARCH=amd64 go build -trimpath -ldflags "-X sqlturbo/internal/version.BuildTime=${BUILD_TIME}" -o ./sqlturbo ./cmd/sqlturbo
+BUILD_TIME="$(date '+%Y-%m-%dT%H:%M:%S%z')" GOOS=darwin GOARCH=amd64 go build -trimpath -ldflags "-X sqlturbo/internal/version.BuildTime=${BUILD_TIME}" -o ./sqlturbo-darwin-amd64 ./cmd/sqlturbo
+
+# linux
+BUILD_TIME="$(date '+%Y-%m-%dT%H:%M:%S%z')" GOOS=linux GOARCH=amd64 go build -trimpath -ldflags "-X sqlturbo/internal/version.BuildTime=${BUILD_TIME}" -o ./sqlturbo-linux-amd64 ./cmd/sqlturbo
+
 ```
 
 cmd构建命令：
 
 ```cmd
-powershell -NoProfile -Command "$env:GOCACHE=(Join-Path (Get-Location) '.gocache'); $env:GOMODCACHE=(Join-Path (Get-Location) '.gomodcache'); $env:GOOS='windows'; $env:GOARCH='amd64'; $buildTime=(Get-Date).ToString('yyyy-MM-ddTHH:mm:sszzz'); go build -trimpath -ldflags ('-X sqlturbo/internal/version.BuildTime=' + $buildTime) -o .\sqlturbo.exe .\cmd\sqlturbo"
+# win
+powershell -NoProfile -Command "$env:GOCACHE=(Join-Path (Get-Location) '.gocache'); $env:GOMODCACHE=(Join-Path (Get-Location) '.gomodcache'); $env:GOOS='windows'; $env:GOARCH='amd64'; $buildTime=(Get-Date).ToString('yyyy-MM-ddTHH:mm:sszzz'); go build -trimpath -ldflags ('-X sqlturbo/internal/version.BuildTime=' + $buildTime) -o .\sqlturbo-win-amd64.exe .\cmd\sqlturbo"
+
+# mac
+powershell -NoProfile -Command "$env:GOCACHE=(Join-Path (Get-Location) '.gocache'); $env:GOMODCACHE=(Join-Path (Get-Location) '.gomodcache'); $env:GOOS='darwin'; $env:GOARCH='amd64'; $buildTime=(Get-Date).ToString('yyyy-MM-ddTHH:mm:sszzz'); go build -trimpath -ldflags ('-X sqlturbo/internal/version.BuildTime=' + $buildTime) -o .\sqlturbo-darwin-amd64 .\cmd\sqlturbo"
+
+# linux
+powershell -NoProfile -Command "$env:GOCACHE=(Join-Path (Get-Location) '.gocache'); $env:GOMODCACHE=(Join-Path (Get-Location) '.gomodcache'); $env:GOOS='linux'; $env:GOARCH='amd64'; $buildTime=(Get-Date).ToString('yyyy-MM-ddTHH:mm:sszzz'); go build -trimpath -ldflags ('-X sqlturbo/internal/version.BuildTime=' + $buildTime) -o .\sqlturbo-linux-amd64 .\cmd\sqlturbo"
+
 ```
 
 使用方式：
 
+初始化时会自动生成配置文件和需要使用到的数据，配置文件在data目录中，可自行配置
+
 ```bash
+# mac和linux下
 ./sqlturbo
+
+# 或者win下，直接点击
+./sqlturbo.exe
 ```
 
 
