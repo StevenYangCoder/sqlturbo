@@ -39,15 +39,26 @@ func NewService(rootDir string, app domainconfig.Application, snapshot history.S
 
 // Run 会并发执行所有已选数据库，并把实时状态持续推送到展示层。
 func (s *Service) Run(ctx context.Context, databases []domainconfig.Database, notify func(domainruntime.StatusUpdate)) error {
+	if len(databases) == 0 {
+		return nil
+	}
+
 	var waitGroup sync.WaitGroup
 	var mutex sync.Mutex
 	failures := make([]string, 0)
+	concurrency := s.app.Concurrency
+	if concurrency <= 0 || concurrency > len(databases) {
+		concurrency = len(databases)
+	}
+	limiter := make(chan struct{}, concurrency)
 
 	for _, database := range databases {
+		limiter <- struct{}{}
 		waitGroup.Add(1)
 
 		go func(database domainconfig.Database) {
 			defer waitGroup.Done()
+			defer func() { <-limiter }()
 			if err := s.runOne(ctx, database, notify); err != nil {
 				mutex.Lock()
 				failures = append(failures, fmt.Sprintf("%s：%v", database.ID, err))

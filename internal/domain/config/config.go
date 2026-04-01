@@ -16,9 +16,10 @@ type AppConfig struct {
 
 // Application 定义程序运行所需的全局配置。
 type Application struct {
-	WaitTime   int        `yaml:"wait_time"`
-	RetryTimes int        `yaml:"retry_times"`
-	Databases  []Database `yaml:"sql_turbo"`
+	WaitTime    int        `yaml:"wait_time"`
+	RetryTimes  int        `yaml:"retry_times"`
+	Concurrency int        `yaml:"concurrency"`
+	Databases   []Database `yaml:"sql_turbo"`
 }
 
 // Database 定义单个数据库执行节点的全部信息。
@@ -57,6 +58,9 @@ func (a Application) Normalize() Application {
 	}
 	if a.RetryTimes < 0 {
 		a.RetryTimes = 0
+	}
+	if a.Concurrency <= 0 {
+		a.Concurrency = len(a.Databases)
 	}
 
 	for index := range a.Databases {
