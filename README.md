@@ -121,7 +121,7 @@ Space选择和取消，Enter执行，默认选择上一次执行的数据库
 
 
 
-# 四、构建与使用
+# 四、构建
 
 Bash构建命令：
 
@@ -151,9 +151,13 @@ powershell -NoProfile -Command "$env:GOCACHE=(Join-Path (Get-Location) '.gocache
 
 ```
 
-使用方式：
 
-初始化时会自动生成配置文件和需要使用到的数据，配置文件在data目录中，可自行配置
+# 五、使用方式
+1. 新建一个`sqlturbo`的目录
+2. 将`sqlturbo`的二进制文件放在该目录中
+3. 点击二进制文件，初始化数据。页面打开成功，即初始化成功。
+4. 关闭页面，按照实际情况修改`data/application.yaml`
+5. 重新点击，选择对应的数据库，回车执行
 
 ```bash
 # mac和linux下
