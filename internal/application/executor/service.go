@@ -90,6 +90,16 @@ func (s *Service) runOne(ctx context.Context, database domainconfig.Database, no
 		})
 	}
 
+	localSQLFiles, err := s.listLocalSQLFiles()
+	if err != nil {
+		emit(domainruntime.StepFailed, err.Error(), "-", true)
+		return err
+	}
+	if len(localSQLFiles) == 0 {
+		emit(domainruntime.StepCompleted, "当前目录下不存在SQL脚本，无须执行", "-", false)
+		return nil
+	}
+
 	emit(domainruntime.StepInitializing, "正在建立远程连接", "-", false)
 	client, err := remote.NewClient(database)
 	if err != nil {
@@ -127,17 +137,6 @@ func (s *Service) runOne(ctx context.Context, database domainconfig.Database, no
 	}()
 
 	if err := s.removeRemoteSQLFiles(client, database, emit); err != nil {
-		emit(domainruntime.StepFailed, err.Error(), "-", true)
-		return err
-	}
-
-	localSQLFiles, err := s.listLocalSQLFiles()
-	if err != nil {
-		emit(domainruntime.StepFailed, err.Error(), "-", true)
-		return err
-	}
-	if len(localSQLFiles) == 0 {
-		err = fmt.Errorf("当前目录下未找到待执行的 SQL 文件")
 		emit(domainruntime.StepFailed, err.Error(), "-", true)
 		return err
 	}
