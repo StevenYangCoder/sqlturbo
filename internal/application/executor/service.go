@@ -46,6 +46,7 @@ func (s *Service) Run(ctx context.Context, databases []domainconfig.Database, no
 	var waitGroup sync.WaitGroup
 	var mutex sync.Mutex
 	failures := make([]string, 0)
+
 	concurrency := s.app.Concurrency
 	if concurrency <= 0 || concurrency > len(databases) {
 		concurrency = len(databases)
@@ -73,7 +74,6 @@ func (s *Service) Run(ctx context.Context, databases []domainconfig.Database, no
 		sort.Strings(failures)
 		return fmt.Errorf("以下数据库执行失败：%s", strings.Join(failures, "；"))
 	}
-
 	return nil
 }
 
@@ -137,7 +137,7 @@ func (s *Service) runOne(ctx context.Context, database domainconfig.Database, no
 		return err
 	}
 	if len(localSQLFiles) == 0 {
-		err = fmt.Errorf("当前目录下未找到待执行的SQL文件")
+		err = fmt.Errorf("当前目录下未找到待执行的 SQL 文件")
 		emit(domainruntime.StepFailed, err.Error(), "-", true)
 		return err
 	}
@@ -200,10 +200,20 @@ func (s *Service) runOne(ctx context.Context, database domainconfig.Database, no
 	return nil
 }
 
-// acquireLock 会通过排他协调文件把“检查锁 + 创建锁”收敛为原子过程。
+// acquireLock 通过“协调锁 + 业务锁”两段式协议，实现远程目录锁的原子争抢。
 func (s *Service) acquireLock(ctx context.Context, client *remote.Client, database domainconfig.Database, emit func(domainruntime.Step, string, string, bool)) (string, string, error) {
 	guardName := ".sqlturbo_lock_guard"
 	guardPath := path.Join(database.WorkPath, guardName)
+	waitStartedAt := time.Time{}
+
+	waitAndEmit := func(message string) error {
+		if waitStartedAt.IsZero() {
+			waitStartedAt = time.Now()
+		}
+		return waitWithProgress(ctx, s.app.WaitTime, waitStartedAt, func(progress string) {
+			emit(domainruntime.StepWaitingLock, message, progress, false)
+		})
+	}
 
 	for attempt := 0; ; attempt++ {
 		emit(domainruntime.StepAcquireLock, "正在检查远程锁文件", "-", false)
@@ -216,12 +226,8 @@ func (s *Service) acquireLock(ctx context.Context, client *remote.Client, databa
 			if attempt >= s.app.RetryTimes {
 				return "", "", fmt.Errorf("远程目录存在锁竞争，请稍后重试")
 			}
-
-			emit(domainruntime.StepWaitingLock, "等待锁协调文件释放["+guardName+"]", fmt.Sprintf("%ds", s.app.WaitTime), false)
-			select {
-			case <-ctx.Done():
-				return "", "", ctx.Err()
-			case <-time.After(time.Duration(s.app.WaitTime) * time.Second):
+			if err := waitAndEmit("等待锁协调文件释放[" + guardName + "]"); err != nil {
+				return "", "", err
 			}
 			continue
 		}
@@ -256,12 +262,8 @@ func (s *Service) acquireLock(ctx context.Context, client *remote.Client, databa
 				if attempt >= s.app.RetryTimes {
 					return "", "", fmt.Errorf("远程锁创建失败，请稍后重试")
 				}
-
-				emit(domainruntime.StepWaitingLock, "锁创建竞争，准备重试", fmt.Sprintf("%ds", s.app.WaitTime), false)
-				select {
-				case <-ctx.Done():
-					return "", "", ctx.Err()
-				case <-time.After(time.Duration(s.app.WaitTime) * time.Second):
+				if err := waitAndEmit("锁创建竞争，准备重试"); err != nil {
+					return "", "", err
 				}
 				continue
 			}
@@ -273,17 +275,43 @@ func (s *Service) acquireLock(ctx context.Context, client *remote.Client, databa
 		if attempt >= s.app.RetryTimes {
 			return "", "", fmt.Errorf("远程目录存在未释放锁：%s", strings.Join(lockFiles, ", "))
 		}
-
-		emit(domainruntime.StepWaitingLock, "等待锁释放["+strings.Join(lockFiles, ", ")+"]", fmt.Sprintf("%ds", s.app.WaitTime), false)
-		select {
-		case <-ctx.Done():
-			return "", "", ctx.Err()
-		case <-time.After(time.Duration(s.app.WaitTime) * time.Second):
+		if err := waitAndEmit("等待锁释放[" + strings.Join(lockFiles, ", ") + "]"); err != nil {
+			return "", "", err
 		}
 	}
 }
 
-// removeRemoteSQLFiles 会删除远程工作目录中的历史 SQL 文件。
+func waitWithProgress(ctx context.Context, waitSeconds int, startedAt time.Time, onTick func(progress string)) error {
+	if waitSeconds <= 0 {
+		return nil
+	}
+
+	onTick(formatElapsedSeconds(startedAt))
+
+	waitDuration := time.Duration(waitSeconds) * time.Second
+	timer := time.NewTimer(waitDuration)
+	ticker := time.NewTicker(time.Second)
+	defer timer.Stop()
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+			onTick(formatElapsedSeconds(startedAt))
+		case <-timer.C:
+			onTick(formatElapsedSeconds(startedAt))
+			return nil
+		}
+	}
+}
+
+func formatElapsedSeconds(startedAt time.Time) string {
+	return fmt.Sprintf("%ds", int(time.Since(startedAt).Seconds()))
+}
+
+// removeRemoteSQLFiles 删除远程工作目录中的历史 SQL 文件。
 func (s *Service) removeRemoteSQLFiles(client *remote.Client, database domainconfig.Database, emit func(domainruntime.Step, string, string, bool)) error {
 	emit(domainruntime.StepDeleteHistory, "正在删除远程历史SQL脚本", "-", false)
 
@@ -300,25 +328,22 @@ func (s *Service) removeRemoteSQLFiles(client *remote.Client, database domaincon
 			return err
 		}
 	}
-
 	return nil
 }
 
-// uploadFiles 会上传一组文件，并在上传时实时回传百分比。
+// uploadFiles 上传 SQL 文件并实时回传百分比。
 func (s *Service) uploadFiles(client *remote.Client, database domainconfig.Database, files []string, emit func(domainruntime.Step, string, string, bool)) error {
 	for _, localPath := range files {
 		fileName := filepath.Base(localPath)
 		remotePath := path.Join(database.WorkPath, fileName)
 
 		err := client.UploadFile(localPath, remotePath, func(written int64, total int64) {
-			progress := formatPercent(written, total)
-			emit(domainruntime.StepUploading, "正在上传["+fileName+"]", progress, false)
+			emit(domainruntime.StepUploading, "正在上传["+fileName+"]", formatPercent(written, total), false)
 		})
 		if err != nil {
 			return err
 		}
 	}
-
 	return nil
 }
 
@@ -328,14 +353,12 @@ func (s *Service) uploadProfileFiles(client *remote.Client, database domainconfi
 		content := normalizeScriptContent(profileFile.Content)
 
 		err := client.UploadContent(remotePath, content, func(written int64, total int64) {
-			progress := formatPercent(written, total)
-			emit(domainruntime.StepUploading, "正在上传["+profileFile.Name+"]", progress, false)
+			emit(domainruntime.StepUploading, "正在上传["+profileFile.Name+"]", formatPercent(written, total), false)
 		})
 		if err != nil {
 			return err
 		}
 	}
-
 	return nil
 }
 
@@ -346,7 +369,7 @@ func normalizeScriptContent(content []byte) []byte {
 	return content
 }
 
-// runRemoteScript 会执行远程脚本，并按秒刷新执行耗时。
+// runRemoteScript 执行远程脚本并按秒刷新执行耗时。
 func (s *Service) runRemoteScript(ctx context.Context, client *remote.Client, scriptName string, command string, emit func(domainruntime.Step, string, string, bool)) error {
 	errCh := make(chan error, 1)
 	startAt := time.Now()
@@ -403,18 +426,17 @@ func parseExecutingSQLFromLine(line string) string {
 	return ""
 }
 
-// downloadRemoteLog 会把远程 info.log 下载到本地 logs 目录。
+// downloadRemoteLog 把远程 info.log 下载到本地 logs 目录。
 func (s *Service) downloadRemoteLog(client *remote.Client, database domainconfig.Database, emit func(domainruntime.Step, string, string, bool)) error {
 	localPath := filepath.Join(s.rootDir, "logs", database.ID+"_info.log")
 	remotePath := path.Join(database.WorkPath, "info.log")
 
 	return client.DownloadFile(remotePath, localPath, func(written int64, total int64) {
-		progress := formatPercent(written, total)
-		emit(domainruntime.StepDownloadingLog, "正在下载["+database.ID+"_info.log]", progress, false)
+		emit(domainruntime.StepDownloadingLog, "正在下载["+database.ID+"_info.log]", formatPercent(written, total), false)
 	})
 }
 
-// listLocalSQLFiles 会读取当前项目根目录下的所有 SQL 文件。
+// listLocalSQLFiles 读取项目根目录中的全部 SQL 文件。
 func (s *Service) listLocalSQLFiles() ([]string, error) {
 	files, err := filepath.Glob(filepath.Join(s.rootDir, "*.sql"))
 	if err != nil {
@@ -424,7 +446,7 @@ func (s *Service) listLocalSQLFiles() ([]string, error) {
 	return files, nil
 }
 
-// buildExecutionCommand 会构建远程 shell 执行命令。
+// buildExecutionCommand 构建远程 shell 执行命令。
 func buildExecutionCommand(database domainconfig.Database, scriptName string) string {
 	quotedArgs := make([]string, 0, len(database.CommandArgs()))
 	for _, arg := range database.CommandArgs() {
@@ -439,7 +461,7 @@ func buildExecutionCommand(database domainconfig.Database, scriptName string) st
 	return strings.Join(parts, " && ")
 }
 
-// shellQuote 会把参数包装成安全的单引号形式，避免远程 shell 解析错误。
+// shellQuote 把参数包装成安全的单引号形式，避免远程 shell 解析错误。
 func shellQuote(value string) string {
 	return "'" + strings.ReplaceAll(value, "'", `'\''`) + "'"
 }
