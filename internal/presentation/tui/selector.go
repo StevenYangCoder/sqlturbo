@@ -3,6 +3,7 @@ package tui
 import (
 	"fmt"
 	"strings"
+	"unicode/utf8"
 
 	domainconfig "sqlturbo/internal/domain/config"
 
@@ -13,9 +14,10 @@ import (
 type selectionKind string
 
 const (
-	selectionAll    selectionKind = "all"
-	selectionGroup  selectionKind = "group"
-	selectionSingle selectionKind = "single"
+	selectionAll          selectionKind = "all"
+	selectionGroup        selectionKind = "group"
+	selectionSingle       selectionKind = "single"
+	selectionHeaderIndent               = "  "
 )
 
 // selectionItem 定义单个可见选择项。
@@ -34,6 +36,9 @@ type selectorModel struct {
 	databases    []domainconfig.Database
 	selected     map[string]bool
 	cursor       int
+	listOffset   int
+	windowWidth  int
+	windowHeight int
 	confirmedIDs []string
 	cancelled    bool
 }
@@ -80,13 +85,13 @@ func (m selectorModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.cancelled = true
 			return m, tea.Quit
 		case "up", "k":
-			if m.cursor > 0 {
-				m.cursor--
-			}
+			m.moveCursorVertical(-1)
 		case "down", "j":
-			if m.cursor < len(m.items)-1 {
-				m.cursor++
-			}
+			m.moveCursorVertical(1)
+		case "left", "h":
+			m.moveCursorHorizontal(-1)
+		case "right", "l":
+			m.moveCursorHorizontal(1)
 		case " ":
 			m.toggleCurrent()
 		case "enter":
@@ -97,9 +102,71 @@ func (m selectorModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.confirmedIDs = selectedIDs
 			return m, tea.Quit
 		}
+	case tea.WindowSizeMsg:
+		m.windowWidth = message.Width
+		m.windowHeight = message.Height
 	}
 
+	m.keepCursorVisible()
 	return m, nil
+}
+
+func (m *selectorModel) moveCursorVertical(delta int) {
+	if len(m.items) == 0 || delta == 0 {
+		return
+	}
+	if !m.isTwoColumnMode() {
+		next := m.cursor + delta
+		if next < 0 {
+			next = 0
+		}
+		if next >= len(m.items) {
+			next = len(m.items) - 1
+		}
+		m.cursor = next
+		return
+	}
+
+	leftIndices, rightIndices := m.columnIndices()
+	if row := indexOf(leftIndices, m.cursor); row >= 0 {
+		nextRow := clamp(row+delta, 0, len(leftIndices)-1)
+		m.cursor = leftIndices[nextRow]
+		return
+	}
+	if row := indexOf(rightIndices, m.cursor); row >= 0 {
+		nextRow := clamp(row+delta, 0, len(rightIndices)-1)
+		m.cursor = rightIndices[nextRow]
+		return
+	}
+}
+
+func (m *selectorModel) moveCursorHorizontal(direction int) {
+	if len(m.items) == 0 || direction == 0 || !m.isTwoColumnMode() {
+		return
+	}
+
+	leftIndices, rightIndices := m.columnIndices()
+	if row := indexOf(leftIndices, m.cursor); row >= 0 {
+		if direction < 0 || len(rightIndices) == 0 {
+			return
+		}
+		targetRow := row
+		if targetRow >= len(rightIndices) {
+			targetRow = len(rightIndices) - 1
+		}
+		m.cursor = rightIndices[targetRow]
+		return
+	}
+	if row := indexOf(rightIndices, m.cursor); row >= 0 {
+		if direction > 0 || len(leftIndices) == 0 {
+			return
+		}
+		targetRow := row
+		if targetRow >= len(leftIndices) {
+			targetRow = len(leftIndices) - 1
+		}
+		m.cursor = leftIndices[targetRow]
+	}
 }
 
 // View 用于渲染数据库选择界面。
@@ -108,20 +175,238 @@ func (m selectorModel) View() string {
 
 	builder.WriteString(buildWelcomeBanner())
 	builder.WriteString("Space选择和取消，Enter执行，默认选择上一次执行的数据库\n\n")
-	for index, item := range m.items {
-		cursor := " "
-		if index == m.cursor {
-			cursor = ">"
-		}
 
-		check := " "
-		if m.isItemSelected(item) {
-			check = "x"
+	if m.isTwoColumnMode() {
+		header, lines := m.renderTwoColumnSection()
+		builder.WriteString(header)
+		builder.WriteString("\n")
+		for _, line := range m.visibleListLines(lines, 1) {
+			builder.WriteString(line)
+			builder.WriteString("\n")
 		}
+		return builder.String()
+	}
 
-		builder.WriteString(fmt.Sprintf("%s [%s] %s\n", cursor, check, item.Label))
+	builder.WriteString(selectionHeaderIndent + "详情如下：\n")
+	lines := m.renderSingleColumnLines()
+	for _, line := range m.visibleListLines(lines, 1) {
+		builder.WriteString(line)
+		builder.WriteString("\n")
 	}
 	return builder.String()
+}
+
+func (m selectorModel) renderSingleColumnLines() []string {
+	lines := make([]string, 0, len(m.items))
+	for index, item := range m.items {
+		lines = append(lines, m.renderSelectionLine(item, index))
+	}
+	return lines
+}
+
+func (m selectorModel) renderTwoColumnSection() (string, []string) {
+	leftLines := make([]string, 0, len(m.items))
+	rightLines := make([]string, 0, len(m.items))
+
+	for index, item := range m.items {
+		line := m.renderSelectionLine(item, index)
+		if item.Kind == selectionSingle {
+			leftLines = append(leftLines, line)
+			continue
+		}
+		rightLines = append(rightLines, line)
+	}
+
+	leftWidth := 0
+	for _, line := range leftLines {
+		if width := utf8.RuneCountInString(line); width > leftWidth {
+			leftWidth = width
+		}
+	}
+
+	rowCount := len(leftLines)
+	if len(rightLines) > rowCount {
+		rowCount = len(rightLines)
+	}
+
+	lines := make([]string, 0, rowCount)
+	for row := 0; row < rowCount; row++ {
+		left := ""
+		if row < len(leftLines) {
+			left = leftLines[row]
+		}
+		right := ""
+		if row < len(rightLines) {
+			right = rightLines[row]
+		}
+
+		padding := leftWidth - utf8.RuneCountInString(left)
+		if padding < 0 {
+			padding = 0
+		}
+		lines = append(lines, left+strings.Repeat(" ", padding+4)+right)
+	}
+
+	leftHeader := selectionHeaderIndent + "详情"
+	rightHeader := selectionHeaderIndent + "分组"
+	header := leftHeader + strings.Repeat(" ", maxInt(leftWidth-utf8.RuneCountInString(leftHeader)+4, 4)) + rightHeader
+	return header, lines
+}
+
+func (m selectorModel) isTwoColumnMode() bool {
+	return len(m.databases) > 10
+}
+
+func (m selectorModel) columnIndices() ([]int, []int) {
+	leftIndices := make([]int, 0, len(m.items))
+	rightIndices := make([]int, 0, len(m.items))
+	for index, item := range m.items {
+		if item.Kind == selectionSingle {
+			leftIndices = append(leftIndices, index)
+			continue
+		}
+		rightIndices = append(rightIndices, index)
+	}
+	return leftIndices, rightIndices
+}
+
+func (m selectorModel) renderSelectionLine(item selectionItem, index int) string {
+	cursor := " "
+	if index == m.cursor {
+		cursor = ">"
+	}
+
+	check := " "
+	if m.isItemSelected(item) {
+		check = "x"
+	}
+
+	return fmt.Sprintf("%s [%s] %s", cursor, check, item.Label)
+}
+
+func (m selectorModel) visibleListLines(lines []string, sectionHeaderLines int) []string {
+	if m.windowHeight <= 0 {
+		return lines
+	}
+
+	available := m.listVisibleHeight(sectionHeaderLines)
+	if available <= 0 || len(lines) <= available {
+		return lines
+	}
+
+	start := m.listOffset
+	if start < 0 {
+		start = 0
+	}
+	maxStart := len(lines) - available
+	if start > maxStart {
+		start = maxStart
+	}
+	end := start + available
+	visible := append([]string(nil), lines[start:end]...)
+	if end < len(lines) && len(visible) > 0 {
+		visible[len(visible)-1] = selectionHeaderIndent + "..."
+	}
+	return visible
+}
+
+func (m *selectorModel) keepCursorVisible() {
+	if m.windowHeight <= 0 {
+		return
+	}
+
+	available := m.listVisibleHeight(1)
+	if available <= 0 {
+		m.listOffset = 0
+		return
+	}
+
+	totalRows := m.listRowCount()
+	if totalRows <= available {
+		m.listOffset = 0
+		return
+	}
+
+	cursorRow := m.cursorRow()
+	if cursorRow < m.listOffset {
+		m.listOffset = cursorRow
+	} else if cursorRow >= m.listOffset+available {
+		m.listOffset = cursorRow - available + 1
+	}
+
+	maxOffset := totalRows - available
+	if m.listOffset < 0 {
+		m.listOffset = 0
+	}
+	if m.listOffset > maxOffset {
+		m.listOffset = maxOffset
+	}
+}
+
+func (m selectorModel) listVisibleHeight(sectionHeaderLines int) int {
+	// 额外预留 1 行，避免首屏因为边界滚动把欢迎框顶行挤掉。
+	headerLines := countLines(buildWelcomeBanner()) + 2 + sectionHeaderLines
+	return m.windowHeight - headerLines - 1
+}
+
+func (m selectorModel) listRowCount() int {
+	if !m.isTwoColumnMode() {
+		return len(m.items)
+	}
+
+	leftIndices, rightIndices := m.columnIndices()
+	if len(leftIndices) > len(rightIndices) {
+		return len(leftIndices)
+	}
+	return len(rightIndices)
+}
+
+func (m selectorModel) cursorRow() int {
+	if !m.isTwoColumnMode() {
+		return m.cursor
+	}
+
+	leftIndices, rightIndices := m.columnIndices()
+	if row := indexOf(leftIndices, m.cursor); row >= 0 {
+		return row
+	}
+	if row := indexOf(rightIndices, m.cursor); row >= 0 {
+		return row
+	}
+	return 0
+}
+
+func indexOf(items []int, target int) int {
+	for index, item := range items {
+		if item == target {
+			return index
+		}
+	}
+	return -1
+}
+
+func clamp(value int, min int, max int) int {
+	if value < min {
+		return min
+	}
+	if value > max {
+		return max
+	}
+	return value
+}
+
+func maxInt(a int, b int) int {
+	if a > b {
+		return a
+	}
+	return b
+}
+
+func countLines(value string) int {
+	if value == "" {
+		return 0
+	}
+	return strings.Count(value, "\n")
 }
 
 // toggleCurrent 会根据当前光标所在项更新选中状态。

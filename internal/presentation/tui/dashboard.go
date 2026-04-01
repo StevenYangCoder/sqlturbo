@@ -105,11 +105,13 @@ func (m dashboardModel) View() string {
 
 	builder.WriteString("\n数据库执行中，界面会实时刷新当前进度。\n")
 	builder.WriteString("执行详情如下：\n\n")
+	builder.WriteString("序号  详情\n")
 
-	for _, id := range m.order {
+	for index, id := range m.order {
 		status := m.status[id]
 		builder.WriteString(fmt.Sprintf(
-			"%s......%s......%s......%s\n",
+			"%-4d %s......%s......%s......%s\n",
+			index+1,
 			id,
 			emptyFallback(string(status.Step)),
 			emptyFallback(status.Message),
