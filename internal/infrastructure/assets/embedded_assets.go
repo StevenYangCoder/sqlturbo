@@ -11,7 +11,7 @@ import (
 
 const runtimeConfigName = "application.yaml"
 
-// ProfileFile 表示内嵌在程序中的数据库策略文件。
+// ProfileFile 表示内置的数据库策略脚本文件。
 type ProfileFile struct {
 	Name    string
 	Content []byte
@@ -22,9 +22,11 @@ type ProfileFile struct {
 //go:embed data/application.yaml data/db_profiles/dm/sql_execute_dm.sh data/db_profiles/mysql/sql_execute_mysql.sh
 var embeddedData embed.FS
 
-// EnsureRuntimeData 会在第一次运行时初始化 data 目录中的模板文件。
+// EnsureRuntimeData 确保运行时需要的数据目录和模板文件存在。
 func EnsureRuntimeData(rootDir string) ([]string, error) {
+	// data 目录存放模板、history 和策略脚本。
 	dataDir := filepath.Join(rootDir, "data")
+	// logs 目录用于运行时日志输出。
 	logsDir := filepath.Join(rootDir, "logs")
 
 	if err := os.MkdirAll(logsDir, 0o755); err != nil {
@@ -46,6 +48,7 @@ func EnsureRuntimeData(rootDir string) ([]string, error) {
 	return created, nil
 }
 
+// ensureEmbeddedFile 将内置资源落盘到目标路径。
 func ensureEmbeddedFile(target string, embeddedPath string) (bool, error) {
 	if _, err := os.Stat(target); err == nil {
 		return false, nil
@@ -59,7 +62,7 @@ func ensureEmbeddedFile(target string, embeddedPath string) (bool, error) {
 
 	content, err := fs.ReadFile(embeddedData, embeddedPath)
 	if err != nil {
-		return false, fmt.Errorf("读取内嵌模板失败：%w", err)
+		return false, fmt.Errorf("读取内置模板失败：%w", err)
 	}
 	if err := os.WriteFile(target, content, 0o644); err != nil {
 		return false, fmt.Errorf("写入模板文件失败：%w", err)
@@ -67,7 +70,7 @@ func ensureEmbeddedFile(target string, embeddedPath string) (bool, error) {
 	return true, nil
 }
 
-// ListProfileFiles 返回指定数据库类型对应的内嵌策略脚本。
+// ListProfileFiles 返回指定数据库类型对应的内置策略脚本。
 func ListProfileFiles(dbType string) ([]ProfileFile, error) {
 	filePath, fileName, err := profileScriptPath(dbType)
 	if err != nil {
@@ -76,7 +79,7 @@ func ListProfileFiles(dbType string) ([]ProfileFile, error) {
 
 	content, err := fs.ReadFile(embeddedData, filePath)
 	if err != nil {
-		return nil, fmt.Errorf("读取内嵌策略文件失败：%w", err)
+		return nil, fmt.Errorf("读取内置策略文件失败：%w", err)
 	}
 
 	return []ProfileFile{
@@ -87,6 +90,7 @@ func ListProfileFiles(dbType string) ([]ProfileFile, error) {
 	}, nil
 }
 
+// profileScriptPath 把数据库类型映射到对应的脚本路径。
 func profileScriptPath(dbType string) (string, string, error) {
 	switch dbType {
 	case "dm":

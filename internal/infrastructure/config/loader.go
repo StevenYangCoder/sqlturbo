@@ -10,8 +10,9 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// LoadAppConfig 会按优先级读取配置文件，并完成标准化与校验。
+// LoadAppConfig 按固定优先级读取配置文件，并完成标准化和校验。
 func LoadAppConfig(rootDir string) (domainconfig.AppConfig, string, error) {
+	// 默认只读取项目 data 目录下的 application.yaml。
 	candidate := filepath.Join(rootDir, "data", "application.yaml")
 
 	content, err := os.ReadFile(candidate)
@@ -27,6 +28,7 @@ func LoadAppConfig(rootDir string) (domainconfig.AppConfig, string, error) {
 		return domainconfig.AppConfig{}, "", fmt.Errorf("解析配置文件[%s]失败：%w", candidate, err)
 	}
 
+	// 先补默认值，再做合法性校验。
 	appConfig = appConfig.Normalize()
 	if err := appConfig.Validate(); err != nil {
 		return domainconfig.AppConfig{}, "", fmt.Errorf("校验配置文件[%s]失败：%w", candidate, err)

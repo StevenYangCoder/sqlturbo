@@ -6,15 +6,16 @@ import (
 	"strings"
 )
 
-// SupportedDBTypes 定义当前工具支持的数据库类型。
+// SupportedDBTypes 列出当前工具支持的数据库类型。
 var SupportedDBTypes = []string{"mysql", "dm"}
 
-// AppConfig 是应用根配置，直接映射 YAML 顶层结构。
+// AppConfig 表示应用级 YAML 配置的根对象。
 type AppConfig struct {
+	// Application 对应 application 节点。
 	Application Application `yaml:"application"`
 }
 
-// Application 定义程序运行所需的全局配置。
+// Application 保存运行时调度所需的全局配置。
 type Application struct {
 	WaitTime    int        `yaml:"wait_time"`
 	RetryTimes  int        `yaml:"retry_times"`
@@ -22,7 +23,7 @@ type Application struct {
 	Databases   []Database `yaml:"sql_turbo"`
 }
 
-// Database 定义单个数据库执行节点的全部信息。
+// Database 保存单个数据库执行节点的全部信息。
 type Database struct {
 	ID          string `yaml:"id"`
 	Group       string `yaml:"group"`
@@ -40,18 +41,18 @@ type Database struct {
 	EnvPath     string `yaml:"env_path"`
 }
 
-// Normalize 会修正默认值，保证后续流程使用统一的配置语义。
+// Normalize 规范化根配置并传递给内部 Application。
 func (c AppConfig) Normalize() AppConfig {
 	c.Application = c.Application.Normalize()
 	return c
 }
 
-// Validate 会检查配置完整性，避免程序启动后才暴露配置问题。
+// Validate 校验根配置是否可以用于启动。
 func (c AppConfig) Validate() error {
 	return c.Application.Validate()
 }
 
-// Normalize 会修正等待与重试等默认值，并标准化每个数据库配置。
+// Normalize 规范化全局参数并修正默认值。
 func (a Application) Normalize() Application {
 	if a.WaitTime < 1 {
 		a.WaitTime = 1
@@ -70,7 +71,7 @@ func (a Application) Normalize() Application {
 	return a
 }
 
-// Validate 会校验所有数据库配置与全局参数。
+// Validate 校验全局参数和所有数据库定义。
 func (a Application) Validate() error {
 	if len(a.Databases) == 0 {
 		return fmt.Errorf("application.sql_turbo 不能为空")
@@ -90,7 +91,7 @@ func (a Application) Validate() error {
 	return nil
 }
 
-// FilterSelected 会按照原始配置顺序返回被选中的数据库。
+// FilterSelected 按照用户选择结果返回数据库列表，并保持原始顺序。
 func (a Application) FilterSelected(selectedIDs []string) []Database {
 	selected := make(map[string]struct{}, len(selectedIDs))
 	for _, id := range selectedIDs {
@@ -107,7 +108,7 @@ func (a Application) FilterSelected(selectedIDs []string) []Database {
 	return filtered
 }
 
-// Normalize 会修正单库配置中的默认值与格式。
+// Normalize 规范化单个数据库节点。
 func (d Database) Normalize() Database {
 	d.ID = strings.TrimSpace(d.ID)
 	d.Group = strings.TrimSpace(d.Group)
@@ -127,7 +128,7 @@ func (d Database) Normalize() Database {
 	return d
 }
 
-// Validate 会校验单个数据库节点配置是否合法。
+// Validate 校验单个数据库节点配置是否合法。
 func (d Database) Validate() error {
 	switch {
 	case d.ID == "":
@@ -166,7 +167,7 @@ func (d Database) SSHUser() string {
 	return "root"
 }
 
-// ShellScriptName 返回不同数据库对应的远程执行脚本名称。
+// ShellScriptName 根据数据库类型返回对应的远程脚本名。
 func (d Database) ShellScriptName() (string, error) {
 	switch d.DBType {
 	case "mysql":
@@ -183,12 +184,12 @@ func (d Database) ProfileDirectory() string {
 	return d.DBType
 }
 
-// RuntimePathDirectory 返回执行脚本前需要追加到 PATH 的远程目录。
+// RuntimePathDirectory 返回执行脚本前需要追加到 PATH 的目录。
 func (d Database) RuntimePathDirectory() string {
 	return d.EnvPath
 }
 
-// CommandArgs 返回远程脚本执行时的命令行参数。
+// CommandArgs 返回远程脚本需要的命令行参数。
 func (d Database) CommandArgs() []string {
 	return []string{
 		fmt.Sprintf("-ip=%s", d.DBHost),

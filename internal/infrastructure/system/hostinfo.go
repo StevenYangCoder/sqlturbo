@@ -13,10 +13,11 @@ import (
 	"sqlturbo/internal/domain/history"
 )
 
-// CollectHostSnapshot 会收集本机 IP、MAC 与公网 IP 信息。
+// CollectHostSnapshot 收集本机 IP、MAC 和公网 IP 信息。
 func CollectHostSnapshot(ctx context.Context, logger *slog.Logger) (history.Snapshot, error) {
 	snapshot := history.Snapshot{}
 
+	// 先收集本机网卡信息。
 	ifaces, err := net.Interfaces()
 	if err != nil {
 		return snapshot, fmt.Errorf("读取网卡信息失败：%w", err)
@@ -52,12 +53,14 @@ func CollectHostSnapshot(ctx context.Context, logger *slog.Logger) (history.Snap
 		}
 	}
 
+	// 再尝试查询公网 IPv4。
 	if ip, err := lookupPublicIP(ctx, "https://api.ipify.org"); err == nil {
 		snapshot.PublicIPv4 = append(snapshot.PublicIPv4, ip)
 	} else {
 		logger.Warn("获取公网IPv4失败", "错误", err)
 	}
 
+	// 再尝试查询公网 IPv6。
 	if ip, err := lookupPublicIP(ctx, "https://api64.ipify.org"); err == nil {
 		parsedIP := net.ParseIP(ip)
 		switch {
@@ -76,7 +79,7 @@ func CollectHostSnapshot(ctx context.Context, logger *slog.Logger) (history.Snap
 	return snapshot, nil
 }
 
-// extractIP 会从 net.Addr 中提取标准 IP 对象。
+// extractIP 从 net.Addr 中提取 IP。
 func extractIP(address net.Addr) net.IP {
 	switch value := address.(type) {
 	case *net.IPNet:
@@ -88,7 +91,7 @@ func extractIP(address net.Addr) net.IP {
 	}
 }
 
-// lookupPublicIP 会向公网服务查询当前出口 IP。
+// lookupPublicIP 调用公网服务获取当前出口 IP。
 func lookupPublicIP(ctx context.Context, url string) (string, error) {
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {

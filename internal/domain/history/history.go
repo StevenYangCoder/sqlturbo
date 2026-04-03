@@ -9,7 +9,7 @@ import (
 	"strings"
 )
 
-// Snapshot 保存本机信息和上一次执行的数据库ID列表。
+// Snapshot 保存本机网络信息和上一次执行时的数据库选择记录。
 type Snapshot struct {
 	LocalIPv4   []string
 	LocalIPv6   []string
@@ -19,8 +19,9 @@ type Snapshot struct {
 	SelectedIDs []string
 }
 
-// ReadSnapshot 读取 history 文件，并解析为内存对象。
+// ReadSnapshot 读取 history 文件并解析为 Snapshot。
 func ReadSnapshot(path string) (Snapshot, error) {
+	// 打开历史文件。
 	file, err := os.Open(path)
 	if err != nil {
 		return Snapshot{}, err
@@ -28,6 +29,7 @@ func ReadSnapshot(path string) (Snapshot, error) {
 	defer file.Close()
 
 	var snapshot Snapshot
+	// 按行读取 history 内容。
 	scanner := bufio.NewScanner(file)
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
@@ -64,7 +66,7 @@ func ReadSnapshot(path string) (Snapshot, error) {
 	return snapshot, nil
 }
 
-// Normalize 会清洗重复值并保证顺序稳定。
+// Normalize 去重并规范化 Snapshot 的内部切片。
 func (s *Snapshot) Normalize() {
 	s.LocalIPv4 = uniqueSorted(s.LocalIPv4)
 	s.LocalIPv6 = uniqueSorted(s.LocalIPv6)
@@ -74,8 +76,9 @@ func (s *Snapshot) Normalize() {
 	s.SelectedIDs = uniquePreserveOrder(s.SelectedIDs)
 }
 
-// WriteSnapshot 会按约定格式写入 history 文件。
+// WriteSnapshot 将 Snapshot 写回 history 文件。
 func WriteSnapshot(path string, snapshot Snapshot) error {
+	// 先规范化再写入，保证文件内容稳定。
 	snapshot.Normalize()
 
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
@@ -97,7 +100,7 @@ func WriteSnapshot(path string, snapshot Snapshot) error {
 	return nil
 }
 
-// LockContent 返回锁文件需要写入的主机信息内容。
+// LockContent 返回锁文件中需要写入的主机信息摘要。
 func (s Snapshot) LockContent() string {
 	s.Normalize()
 
@@ -110,14 +113,15 @@ func (s Snapshot) LockContent() string {
 	return builder.String()
 }
 
-// appendSeries 负责生成 key=value 的多行文本。
+// appendSeries 生成 key=value 格式的多行文本。
 func appendSeries(builder *strings.Builder, prefix string, values []string) {
 	for index, value := range values {
+		// history 文件使用从 1 开始的序号。
 		builder.WriteString(fmt.Sprintf("%s%d=%s\n", prefix, index+1, value))
 	}
 }
 
-// uniqueSorted 会去重并排序，保证 history 文件可预测。
+// uniqueSorted 对值去重后排序，保证输出稳定。
 func uniqueSorted(values []string) []string {
 	set := make(map[string]struct{}, len(values))
 	for _, value := range values {
@@ -136,7 +140,7 @@ func uniqueSorted(values []string) []string {
 	return result
 }
 
-// uniquePreserveOrder 会在保留原始顺序的前提下去重。
+// uniquePreserveOrder 对值去重，但保留首次出现顺序。
 func uniquePreserveOrder(values []string) []string {
 	set := make(map[string]struct{}, len(values))
 	result := make([]string, 0, len(values))
