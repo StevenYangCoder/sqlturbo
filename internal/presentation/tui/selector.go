@@ -55,6 +55,9 @@ func RunSelector(databases []domainconfig.Database, defaultIDs []string) ([]stri
 		model.selected[id] = true
 	}
 
+	// 默认把光标停在“已选中的分组项”上；如果没有，再停在“已选中的详情项”上。
+	model.cursor = model.initialCursorIndex()
+
 	program := tea.NewProgram(model)
 	finalModel, err := program.Run()
 	if err != nil {
@@ -407,6 +410,40 @@ func countLines(value string) int {
 		return 0
 	}
 	return strings.Count(value, "\n")
+}
+
+// initialCursorIndex 会按照“第一个已选择节点”规则定位初始光标。
+// 分组优先级为 ALL > DB ALL > GROUP，其次才是详情节点。
+func (m selectorModel) initialCursorIndex() int {
+	if len(m.items) == 0 {
+		return 0
+	}
+
+	for index, item := range m.items {
+		if item.Kind == selectionAll && m.isItemSelected(item) {
+			return index
+		}
+	}
+
+	for index, item := range m.items {
+		if item.Kind == selectionGroup && item.DBType != "" && m.isItemSelected(item) {
+			return index
+		}
+	}
+
+	for index, item := range m.items {
+		if item.Kind == selectionGroup && item.Group != "" && m.isItemSelected(item) {
+			return index
+		}
+	}
+
+	for index, item := range m.items {
+		if item.Kind == selectionSingle && m.isItemSelected(item) {
+			return index
+		}
+	}
+
+	return 0
 }
 
 // toggleCurrent 会根据当前光标所在项更新选中状态。
