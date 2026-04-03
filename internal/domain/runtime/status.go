@@ -11,6 +11,7 @@ const (
 	StepCreateLock     Step = "锁创建中"
 	StepDeleteHistory  Step = "删除历史脚本"
 	StepUploading      Step = "脚本上传中"
+	StepVerifyingHash  Step = "哈希校验中"
 	StepExecuting      Step = "脚本执行中"
 	StepDownloadingLog Step = "日志下载中"
 	StepReleasingLock  Step = "锁释放中"

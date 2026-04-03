@@ -17,7 +17,13 @@ import (
 	domainconfig "sqlturbo/internal/domain/config"
 
 	"github.com/pkg/sftp"
+	"github.com/zeebo/xxh3"
 	"golang.org/x/crypto/ssh"
+)
+
+const (
+	uploadProgressMinInterval = 200 * time.Millisecond
+	sftpUploadConcurrency     = 64
 )
 
 // ProgressFunc 用于回传上传或下载过程中的进度信息。
@@ -44,7 +50,11 @@ func NewClient(database domainconfig.Database) (*Client, error) {
 		return nil, fmt.Errorf("连接远程服务器失败：%w", err)
 	}
 
-	sftpClient, err := sftp.NewClient(sshClient)
+	sftpClient, err := sftp.NewClient(
+		sshClient,
+		sftp.UseConcurrentWrites(true),
+		sftp.MaxConcurrentRequestsPerFile(sftpUploadConcurrency),
+	)
 	if err != nil {
 		sshClient.Close()
 		return nil, fmt.Errorf("创建SFTP客户端失败：%w", err)
@@ -325,10 +335,41 @@ func (c *Client) uploadStream(reader io.Reader, size int64, remotePath string, o
 	}
 	defer remoteFile.Close()
 
-	if err := copyWithProgress(remoteFile, reader, size, onProgress); err != nil {
+	progressReader := newProgressReader(reader, size, onProgress, uploadProgressMinInterval)
+	written, err := remoteFile.ReadFromWithConcurrency(progressReader, sftpUploadConcurrency)
+	if err != nil {
+		_ = c.sftpClient.Remove(remotePath)
 		return fmt.Errorf("上传文件失败：%w", err)
 	}
+	if size >= 0 && written != size {
+		_ = c.sftpClient.Remove(remotePath)
+		return fmt.Errorf("上传文件失败，写入字节数不匹配：written=%d,total=%d", written, size)
+	}
+	progressReader.ForceReport()
 	return nil
+}
+
+// ComputeRemoteXXH3 会计算远程文件的 xxHash3，并持续回传计算进度。
+func (c *Client) ComputeRemoteXXH3(remotePath string, onProgress ProgressFunc) (string, error) {
+	remoteFile, err := c.sftpClient.Open(remotePath)
+	if err != nil {
+		return "", fmt.Errorf("打开远程文件失败：%w", err)
+	}
+	defer remoteFile.Close()
+
+	info, err := remoteFile.Stat()
+	if err != nil {
+		return "", fmt.Errorf("读取远程文件信息失败：%w", err)
+	}
+
+	remoteHash := xxh3.New()
+	progressReader := newProgressReader(remoteFile, info.Size(), onProgress, uploadProgressMinInterval)
+	if _, err := io.Copy(remoteHash, progressReader); err != nil {
+		return "", fmt.Errorf("读取远程文件计算哈希失败：%w", err)
+	}
+	progressReader.ForceReport()
+
+	return fmt.Sprintf("%016x", remoteHash.Sum64()), nil
 }
 
 // copyWithProgress 会执行流复制，并在每次写入后回调当前进度。
@@ -362,6 +403,59 @@ func copyWithProgress(dst io.Writer, src io.Reader, total int64, onProgress Prog
 			return readErr
 		}
 	}
+}
+
+type progressReader struct {
+	reader         io.Reader
+	total          int64
+	onProgress     ProgressFunc
+	minInterval    time.Duration
+	written        int64
+	lastReportTime time.Time
+}
+
+func newProgressReader(reader io.Reader, total int64, onProgress ProgressFunc, minInterval time.Duration) *progressReader {
+	return &progressReader{
+		reader:         reader,
+		total:          total,
+		onProgress:     onProgress,
+		minInterval:    minInterval,
+		lastReportTime: time.Now(),
+	}
+}
+
+func (r *progressReader) Read(p []byte) (int, error) {
+	readSize, readErr := r.reader.Read(p)
+	if readSize > 0 {
+		r.written += int64(readSize)
+		r.report(false)
+	}
+	if readErr == io.EOF {
+		r.report(true)
+	}
+	return readSize, readErr
+}
+
+func (r *progressReader) ForceReport() {
+	r.report(true)
+}
+
+func (r *progressReader) report(force bool) {
+	if r.onProgress == nil {
+		return
+	}
+
+	now := time.Now()
+	if !force && now.Sub(r.lastReportTime) < r.minInterval {
+		return
+	}
+
+	reported := r.written
+	if r.total > 0 && reported > r.total {
+		reported = r.total
+	}
+	r.lastReportTime = now
+	r.onProgress(reported, r.total)
 }
 
 // isAlreadyExistsError 判断远程创建失败是否因为文件已存在。

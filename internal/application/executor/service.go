@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"log/slog"
+	"os"
 	"path"
 	"path/filepath"
 	"sort"
@@ -17,6 +19,8 @@ import (
 	domainruntime "sqlturbo/internal/domain/runtime"
 	infraAssets "sqlturbo/internal/infrastructure/assets"
 	"sqlturbo/internal/infrastructure/remote"
+
+	"github.com/zeebo/xxh3"
 )
 
 // Service 负责把多个数据库的执行流程编排起来。
@@ -25,6 +29,15 @@ type Service struct {
 	app      domainconfig.Application
 	snapshot history.Snapshot
 	logger   *slog.Logger
+}
+
+type uploadArtifact struct {
+	name       string
+	remotePath string
+	localPath  string
+	content    []byte
+	fromMemory bool
+	localXXH3  string
 }
 
 // NewService 创建执行服务实例。
@@ -100,6 +113,18 @@ func (s *Service) runOne(ctx context.Context, database domainconfig.Database, no
 		return nil
 	}
 
+	profileFiles, err := infraAssets.ListProfileFiles(database.ProfileDirectory())
+	if err != nil {
+		emit(domainruntime.StepFailed, err.Error(), "-", true)
+		return err
+	}
+
+	artifacts, err := s.prepareUploadArtifacts(database, localSQLFiles, profileFiles, emit)
+	if err != nil {
+		emit(domainruntime.StepFailed, err.Error(), "-", true)
+		return err
+	}
+
 	emit(domainruntime.StepInitializing, "正在建立远程连接", "-", false)
 	client, err := remote.NewClient(database)
 	if err != nil {
@@ -141,18 +166,12 @@ func (s *Service) runOne(ctx context.Context, database domainconfig.Database, no
 		return err
 	}
 
-	if err := s.uploadFiles(client, database, localSQLFiles, emit); err != nil {
+	if err := s.uploadArtifacts(client, artifacts, emit); err != nil {
 		emit(domainruntime.StepFailed, err.Error(), "-", true)
 		return err
 	}
 
-	profileFiles, err := infraAssets.ListProfileFiles(database.ProfileDirectory())
-	if err != nil {
-		emit(domainruntime.StepFailed, err.Error(), "-", true)
-		return err
-	}
-
-	if err := s.uploadProfileFiles(client, database, profileFiles, emit); err != nil {
+	if err := s.verifyArtifactsXXH3(client, artifacts, emit); err != nil {
 		emit(domainruntime.StepFailed, err.Error(), "-", true)
 		return err
 	}
@@ -330,15 +349,64 @@ func (s *Service) removeRemoteSQLFiles(client *remote.Client, database domaincon
 	return nil
 }
 
-// uploadFiles 上传 SQL 文件并实时回传百分比。
-func (s *Service) uploadFiles(client *remote.Client, database domainconfig.Database, files []string, emit func(domainruntime.Step, string, string, bool)) error {
-	for _, localPath := range files {
-		fileName := filepath.Base(localPath)
-		remotePath := path.Join(database.WorkPath, fileName)
+func (s *Service) prepareUploadArtifacts(database domainconfig.Database, localSQLFiles []string, profileFiles []infraAssets.ProfileFile, emit func(domainruntime.Step, string, string, bool)) ([]uploadArtifact, error) {
+	total := len(localSQLFiles) + len(profileFiles)
+	if total == 0 {
+		return nil, nil
+	}
 
-		err := client.UploadFile(localPath, remotePath, func(written int64, total int64) {
-			emit(domainruntime.StepUploading, "正在上传["+fileName+"]", formatPercent(written, total), false)
+	artifacts := make([]uploadArtifact, 0, total)
+	completed := 0
+
+	for _, localPath := range localSQLFiles {
+		fileName := filepath.Base(localPath)
+		emit(domainruntime.StepInitializing, "正在计算本地xxHash3["+fileName+"]", formatPercent(int64(completed), int64(total)), false)
+
+		_, xxh3Text, err := calculateLocalFileXXH3(localPath)
+		if err != nil {
+			return nil, err
+		}
+
+		artifacts = append(artifacts, uploadArtifact{
+			name:       fileName,
+			remotePath: path.Join(database.WorkPath, fileName),
+			localPath:  localPath,
+			fromMemory: false,
+			localXXH3:  xxh3Text,
 		})
+		completed++
+	}
+
+	for _, profileFile := range profileFiles {
+		content := normalizeScriptContent(profileFile.Content)
+		emit(domainruntime.StepInitializing, "正在计算本地xxHash3["+profileFile.Name+"]", formatPercent(int64(completed), int64(total)), false)
+
+		artifacts = append(artifacts, uploadArtifact{
+			name:       profileFile.Name,
+			remotePath: path.Join(database.WorkPath, profileFile.Name),
+			content:    content,
+			fromMemory: true,
+			localXXH3:  calculateBytesXXH3(content),
+		})
+		completed++
+	}
+
+	emit(domainruntime.StepInitializing, "本地xxHash3计算完成", "100%", false)
+	return artifacts, nil
+}
+
+func (s *Service) uploadArtifacts(client *remote.Client, artifacts []uploadArtifact, emit func(domainruntime.Step, string, string, bool)) error {
+	for _, artifact := range artifacts {
+		var err error
+		if artifact.fromMemory {
+			err = client.UploadContent(artifact.remotePath, artifact.content, func(written int64, total int64) {
+				emit(domainruntime.StepUploading, "正在上传["+artifact.name+"]", formatPercent(written, total), false)
+			})
+		} else {
+			err = client.UploadFile(artifact.localPath, artifact.remotePath, func(written int64, total int64) {
+				emit(domainruntime.StepUploading, "正在上传["+artifact.name+"]", formatPercent(written, total), false)
+			})
+		}
 		if err != nil {
 			return err
 		}
@@ -346,16 +414,17 @@ func (s *Service) uploadFiles(client *remote.Client, database domainconfig.Datab
 	return nil
 }
 
-func (s *Service) uploadProfileFiles(client *remote.Client, database domainconfig.Database, files []infraAssets.ProfileFile, emit func(domainruntime.Step, string, string, bool)) error {
-	for _, profileFile := range files {
-		remotePath := path.Join(database.WorkPath, profileFile.Name)
-		content := normalizeScriptContent(profileFile.Content)
-
-		err := client.UploadContent(remotePath, content, func(written int64, total int64) {
-			emit(domainruntime.StepUploading, "正在上传["+profileFile.Name+"]", formatPercent(written, total), false)
+func (s *Service) verifyArtifactsXXH3(client *remote.Client, artifacts []uploadArtifact, emit func(domainruntime.Step, string, string, bool)) error {
+	for _, artifact := range artifacts {
+		remoteXXH3, err := client.ComputeRemoteXXH3(artifact.remotePath, func(written int64, total int64) {
+			emit(domainruntime.StepVerifyingHash, "正在校验哈希一致性["+artifact.name+"]", formatPercent(written, total), false)
 		})
 		if err != nil {
 			return err
+		}
+		if remoteXXH3 != artifact.localXXH3 {
+			_ = client.RemoveFile(artifact.remotePath)
+			return fmt.Errorf("文件[%s]xxHash3不匹配：local=%s,remote=%s", artifact.name, artifact.localXXH3, remoteXXH3)
 		}
 	}
 	return nil
@@ -366,6 +435,34 @@ func normalizeScriptContent(content []byte) []byte {
 	content = bytes.ReplaceAll(content, []byte("\r\n"), []byte("\n"))
 	content = bytes.ReplaceAll(content, []byte("\r"), []byte("\n"))
 	return content
+}
+
+func calculateLocalFileXXH3(localPath string) (int64, string, error) {
+	file, err := os.Open(localPath)
+	if err != nil {
+		return 0, "", fmt.Errorf("打开本地文件失败：%w", err)
+	}
+	defer file.Close()
+
+	info, err := file.Stat()
+	if err != nil {
+		return 0, "", fmt.Errorf("读取本地文件信息失败：%w", err)
+	}
+
+	hash := xxh3.New()
+	if _, err := io.Copy(hash, file); err != nil {
+		return 0, "", fmt.Errorf("计算本地文件xxHash3失败：%w", err)
+	}
+
+	return info.Size(), formatXXH3(hash.Sum64()), nil
+}
+
+func calculateBytesXXH3(content []byte) string {
+	return formatXXH3(xxh3.Hash(content))
+}
+
+func formatXXH3(sum uint64) string {
+	return fmt.Sprintf("%016x", sum)
 }
 
 // runRemoteScript 执行远程脚本并按秒刷新执行耗时。
