@@ -29,13 +29,18 @@ const (
 // ProgressFunc 用于回传上传或下载过程中的进度信息。
 type ProgressFunc func(written int64, total int64)
 
-// Client 封装 SSH 与 SFTP 连接，供应用层执行业务流程。
+// UploadResult 保存上传过程中顺手计算出来的本地哈希。
+type UploadResult struct {
+	LocalXXH3 string
+}
+
+// Client 封装 SSH 与 SFTP 连接，供应用层执行远程操作。
 type Client struct {
 	sshClient  *ssh.Client
 	sftpClient *sftp.Client
 }
 
-// NewClient 会基于数据库节点配置建立 SSH/SFTP 连接。
+// NewClient 基于数据库节点配置建立 SSH/SFTP 连接。
 func NewClient(database domainconfig.Database) (*Client, error) {
 	sshConfig := &ssh.ClientConfig{
 		User:            database.SSHUser(),
@@ -66,7 +71,7 @@ func NewClient(database domainconfig.Database) (*Client, error) {
 	}, nil
 }
 
-// Close 会释放 SSH/SFTP 资源。
+// Close 释放 SSH 和 SFTP 连接资源。
 func (c *Client) Close() error {
 	var closeErr error
 
@@ -84,7 +89,7 @@ func (c *Client) Close() error {
 	return closeErr
 }
 
-// EnsureDir 会确保远程目录存在。
+// EnsureDir 确保远程目录存在。
 func (c *Client) EnsureDir(remoteDir string) error {
 	if err := c.sftpClient.MkdirAll(remoteDir); err != nil {
 		return fmt.Errorf("创建远程目录失败：%w", err)
@@ -92,7 +97,7 @@ func (c *Client) EnsureDir(remoteDir string) error {
 	return nil
 }
 
-// ListEntries 会列出远程目录下的文件名称。
+// ListEntries 列出远程目录下的所有条目。
 func (c *Client) ListEntries(remoteDir string) ([]os.FileInfo, error) {
 	entries, err := c.sftpClient.ReadDir(remoteDir)
 	if err != nil {
@@ -101,7 +106,7 @@ func (c *Client) ListEntries(remoteDir string) ([]os.FileInfo, error) {
 	return entries, nil
 }
 
-// RemoveFile 会删除远程文件。
+// RemoveFile 删除远程文件，文件不存在时直接忽略。
 func (c *Client) RemoveFile(remotePath string) error {
 	if err := c.sftpClient.Remove(remotePath); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("删除远程文件失败：%w", err)
@@ -114,20 +119,20 @@ func (c *Client) WriteFile(remotePath string, content string) error {
 	return c.UploadContent(remotePath, []byte(content), nil)
 }
 
-// CreateExclusiveFile 会以排他方式创建远程文件；若文件已存在则返回 false。
+// CreateExclusiveFile 以独占方式创建远程文件。
 func (c *Client) CreateExclusiveFile(remotePath string, content string) (bool, error) {
 	file, err := c.sftpClient.OpenFile(remotePath, os.O_CREATE|os.O_EXCL|os.O_WRONLY)
 	if err != nil {
 		if isAlreadyExistsError(err) {
 			return false, nil
 		}
-		return false, fmt.Errorf("排他创建远程文件失败：%w", err)
+		return false, fmt.Errorf("独占创建远程文件失败：%w", err)
 	}
 	defer file.Close()
 
 	if _, err := io.Copy(file, strings.NewReader(content)); err != nil {
 		_ = c.sftpClient.Remove(remotePath)
-		return false, fmt.Errorf("写入排他创建文件失败：%w", err)
+		return false, fmt.Errorf("写入独占创建文件失败：%w", err)
 	}
 
 	return true, nil
@@ -135,15 +140,21 @@ func (c *Client) CreateExclusiveFile(remotePath string, content string) (bool, e
 
 // UploadFile 会把本地文件上传到远程目录，并持续回传进度。
 func (c *Client) UploadFile(localPath string, remotePath string, onProgress ProgressFunc) error {
+	_, err := c.UploadFileWithHash(localPath, remotePath, onProgress)
+	return err
+}
+
+// UploadFileWithHash 会在上传时同步计算本地 xxHash3。
+func (c *Client) UploadFileWithHash(localPath string, remotePath string, onProgress ProgressFunc) (UploadResult, error) {
 	localFile, err := os.Open(localPath)
 	if err != nil {
-		return fmt.Errorf("打开本地文件失败：%w", err)
+		return UploadResult{}, fmt.Errorf("打开本地文件失败：%w", err)
 	}
 	defer localFile.Close()
 
 	info, err := localFile.Stat()
 	if err != nil {
-		return fmt.Errorf("读取本地文件信息失败：%w", err)
+		return UploadResult{}, fmt.Errorf("读取本地文件信息失败：%w", err)
 	}
 
 	return c.uploadStream(localFile, info.Size(), remotePath, onProgress)
@@ -151,6 +162,12 @@ func (c *Client) UploadFile(localPath string, remotePath string, onProgress Prog
 
 // UploadContent 会把内存中的内容上传到远程目录，并持续回传进度。
 func (c *Client) UploadContent(remotePath string, content []byte, onProgress ProgressFunc) error {
+	_, err := c.UploadContentWithHash(remotePath, content, onProgress)
+	return err
+}
+
+// UploadContentWithHash 会在上传时同步计算内存内容的 xxHash3。
+func (c *Client) UploadContentWithHash(remotePath string, content []byte, onProgress ProgressFunc) (UploadResult, error) {
 	reader := bytes.NewReader(content)
 	return c.uploadStream(reader, int64(len(content)), remotePath, onProgress)
 }
@@ -184,7 +201,7 @@ func (c *Client) DownloadFile(remotePath string, localPath string, onProgress Pr
 	return nil
 }
 
-// RunCommand 会在远程主机执行 shell 命令，并等待执行完成。
+// RunCommand 在远程主机上执行 shell 命令，并等待其完成。
 func (c *Client) RunCommand(ctx context.Context, command string) error {
 	session, err := c.sshClient.NewSession()
 	if err != nil {
@@ -220,7 +237,7 @@ func (c *Client) RunCommand(ctx context.Context, command string) error {
 	}
 }
 
-// RunCommandStream 会流式读取远程命令输出，并按行回调。
+// RunCommandStream 流式读取远程命令的输出，并按行回调。
 func (c *Client) RunCommandStream(ctx context.Context, command string, onLine func(line string)) error {
 	session, err := c.sshClient.NewSession()
 	if err != nil {
@@ -310,6 +327,7 @@ func (c *Client) RunCommandStream(ctx context.Context, command string, onLine fu
 	}
 }
 
+// summarizeCommandOutput 会对过长的命令输出做截断。
 func summarizeCommandOutput(content string) string {
 	content = strings.TrimSpace(content)
 	if content == "" {
@@ -323,30 +341,35 @@ func summarizeCommandOutput(content string) string {
 	return content[:maxLen] + "...(truncated)"
 }
 
-// uploadStream 会把输入流上传到远程文件。
-func (c *Client) uploadStream(reader io.Reader, size int64, remotePath string, onProgress ProgressFunc) error {
+// uploadStream 会把输入流上传到远程文件，并在同一条读取流上计算 xxHash3。
+func (c *Client) uploadStream(reader io.Reader, size int64, remotePath string, onProgress ProgressFunc) (UploadResult, error) {
 	if err := c.sftpClient.MkdirAll(path.Dir(remotePath)); err != nil {
-		return fmt.Errorf("创建远程目录失败：%w", err)
+		return UploadResult{}, fmt.Errorf("创建远程目录失败：%w", err)
 	}
 
 	remoteFile, err := c.sftpClient.OpenFile(remotePath, os.O_CREATE|os.O_TRUNC|os.O_WRONLY)
 	if err != nil {
-		return fmt.Errorf("创建远程文件失败：%w", err)
+		return UploadResult{}, fmt.Errorf("创建远程文件失败：%w", err)
 	}
 	defer remoteFile.Close()
 
-	progressReader := newProgressReader(reader, size, onProgress, uploadProgressMinInterval)
+	localHash := xxh3.New()
+	teeReader := io.TeeReader(reader, localHash)
+	progressReader := newProgressReader(teeReader, size, onProgress, uploadProgressMinInterval)
 	written, err := remoteFile.ReadFromWithConcurrency(progressReader, sftpUploadConcurrency)
 	if err != nil {
 		_ = c.sftpClient.Remove(remotePath)
-		return fmt.Errorf("上传文件失败：%w", err)
+		return UploadResult{}, fmt.Errorf("上传文件失败：%w", err)
 	}
 	if size >= 0 && written != size {
 		_ = c.sftpClient.Remove(remotePath)
-		return fmt.Errorf("上传文件失败，写入字节数不匹配：written=%d,total=%d", written, size)
+		return UploadResult{}, fmt.Errorf("上传文件失败，写入字节数不匹配：written=%d,total=%d", written, size)
 	}
 	progressReader.ForceReport()
-	return nil
+
+	return UploadResult{
+		LocalXXH3: formatXXH3(localHash.Sum64()),
+	}, nil
 }
 
 // ComputeRemoteXXH3 会计算远程文件的 xxHash3，并持续回传计算进度。
@@ -369,7 +392,7 @@ func (c *Client) ComputeRemoteXXH3(remotePath string, onProgress ProgressFunc) (
 	}
 	progressReader.ForceReport()
 
-	return fmt.Sprintf("%016x", remoteHash.Sum64()), nil
+	return formatXXH3(remoteHash.Sum64()), nil
 }
 
 // copyWithProgress 会执行流复制，并在每次写入后回调当前进度。
@@ -405,6 +428,7 @@ func copyWithProgress(dst io.Writer, src io.Reader, total int64, onProgress Prog
 	}
 }
 
+// progressReader 用于节流上传/下载进度回调。
 type progressReader struct {
 	reader         io.Reader
 	total          int64
@@ -414,6 +438,7 @@ type progressReader struct {
 	lastReportTime time.Time
 }
 
+// newProgressReader 创建一个带节流的 reader 包装器。
 func newProgressReader(reader io.Reader, total int64, onProgress ProgressFunc, minInterval time.Duration) *progressReader {
 	return &progressReader{
 		reader:         reader,
@@ -424,6 +449,7 @@ func newProgressReader(reader io.Reader, total int64, onProgress ProgressFunc, m
 	}
 }
 
+// Read 读取数据并按节流规则上报进度。
 func (r *progressReader) Read(p []byte) (int, error) {
 	readSize, readErr := r.reader.Read(p)
 	if readSize > 0 {
@@ -436,10 +462,12 @@ func (r *progressReader) Read(p []byte) (int, error) {
 	return readSize, readErr
 }
 
+// ForceReport 强制刷新一次进度。
 func (r *progressReader) ForceReport() {
 	r.report(true)
 }
 
+// report 在满足节流间隔时触发回调。
 func (r *progressReader) report(force bool) {
 	if r.onProgress == nil {
 		return
@@ -471,4 +499,9 @@ func isAlreadyExistsError(err error) bool {
 
 	message := strings.ToLower(err.Error())
 	return strings.Contains(message, "file already exists") || strings.Contains(message, "already exists")
+}
+
+// formatXXH3 把 uint64 哈希值格式化成固定长度十六进制字符串。
+func formatXXH3(sum uint64) string {
+	return fmt.Sprintf("%016x", sum)
 }

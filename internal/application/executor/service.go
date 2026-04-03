@@ -4,9 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"io"
 	"log/slog"
-	"os"
 	"path"
 	"path/filepath"
 	"sort"
@@ -19,25 +17,34 @@ import (
 	domainruntime "sqlturbo/internal/domain/runtime"
 	infraAssets "sqlturbo/internal/infrastructure/assets"
 	"sqlturbo/internal/infrastructure/remote"
-
-	"github.com/zeebo/xxh3"
 )
 
 // Service 负责把多个数据库的执行流程编排起来。
 type Service struct {
-	rootDir  string
-	app      domainconfig.Application
+	// rootDir 是当前项目根目录，用于查找本地脚本和日志目录。
+	rootDir string
+	// app 保存应用级配置，例如并发数和重试次数。
+	app domainconfig.Application
+	// snapshot 保存执行锁内容等运行期快照。
 	snapshot history.Snapshot
-	logger   *slog.Logger
+	// logger 用于输出运行日志。
+	logger *slog.Logger
 }
 
+// uploadArtifact 表示一个待上传、待校验的文件单元。
 type uploadArtifact struct {
-	name       string
+	// name 是界面和日志里展示的文件名。
+	name string
+	// remotePath 是该文件在远端的完整路径。
 	remotePath string
-	localPath  string
-	content    []byte
+	// localPath 是磁盘上的本地路径，仅对本地文件使用。
+	localPath string
+	// content 是内存中的文件内容，仅对内置 profile 文件使用。
+	content []byte
+	// fromMemory 标记这个文件是否来自内存。
 	fromMemory bool
-	localXXH3  string
+	// localXXH3 是上传时同步计算出来的本地 xxHash3 值。
+	localXXH3 string
 }
 
 // NewService 创建执行服务实例。
@@ -50,26 +57,33 @@ func NewService(rootDir string, app domainconfig.Application, snapshot history.S
 	}
 }
 
-// Run 会并发执行所有已选数据库，并把实时状态持续推送到展示层。
+// Run 并发执行所有已选数据库，并把实时状态持续推送到展示层。
 func (s *Service) Run(ctx context.Context, databases []domainconfig.Database, notify func(domainruntime.StatusUpdate)) error {
 	if len(databases) == 0 {
 		return nil
 	}
 
+	// waitGroup 等待所有数据库任务完成。
 	var waitGroup sync.WaitGroup
+	// mutex 保护失败列表的并发写入。
 	var mutex sync.Mutex
+	// failures 收集每个失败任务的错误信息。
 	failures := make([]string, 0)
 
+	// concurrency 用来限制同时执行的数据库数量。
 	concurrency := s.app.Concurrency
 	if concurrency <= 0 || concurrency > len(databases) {
 		concurrency = len(databases)
 	}
+	// limiter 是一个带缓冲通道，用作并发令牌。
 	limiter := make(chan struct{}, concurrency)
 
 	for _, database := range databases {
+		// 先占用一个并发令牌，再启动 goroutine。
 		limiter <- struct{}{}
 		waitGroup.Add(1)
 
+		// 每个数据库单独跑一个执行流程。
 		go func(database domainconfig.Database) {
 			defer waitGroup.Done()
 			defer func() { <-limiter }()
@@ -92,7 +106,9 @@ func (s *Service) Run(ctx context.Context, databases []domainconfig.Database, no
 
 // runOne 执行单个数据库从连接、上传到远程执行的完整生命周期。
 func (s *Service) runOne(ctx context.Context, database domainconfig.Database, notify func(domainruntime.StatusUpdate)) error {
+	// logger 绑定数据库 ID，方便单库排查问题。
 	logger := s.logger.With("数据库ID", database.ID)
+	// emit 统一包装状态推送，避免各处重复拼装 DatabaseID。
 	emit := func(step domainruntime.Step, message string, progress string, failed bool) {
 		notify(domainruntime.StatusUpdate{
 			DatabaseID: database.ID,
@@ -103,6 +119,7 @@ func (s *Service) runOne(ctx context.Context, database domainconfig.Database, no
 		})
 	}
 
+	// 先收集本地 SQL 文件。
 	localSQLFiles, err := s.listLocalSQLFiles()
 	if err != nil {
 		emit(domainruntime.StepFailed, err.Error(), "-", true)
@@ -113,18 +130,21 @@ func (s *Service) runOne(ctx context.Context, database domainconfig.Database, no
 		return nil
 	}
 
+	// 先读取 profile 文件，后续会一起上传。
 	profileFiles, err := infraAssets.ListProfileFiles(database.ProfileDirectory())
 	if err != nil {
 		emit(domainruntime.StepFailed, err.Error(), "-", true)
 		return err
 	}
 
-	artifacts, err := s.prepareUploadArtifacts(database, localSQLFiles, profileFiles, emit)
+	// 这里只组装待上传清单，不提前计算本地哈希。
+	artifacts, err := s.buildUploadArtifacts(database, localSQLFiles, profileFiles)
 	if err != nil {
 		emit(domainruntime.StepFailed, err.Error(), "-", true)
 		return err
 	}
 
+	// 建立 SSH/SFTP 连接。
 	emit(domainruntime.StepInitializing, "正在建立远程连接", "-", false)
 	client, err := remote.NewClient(database)
 	if err != nil {
@@ -133,17 +153,20 @@ func (s *Service) runOne(ctx context.Context, database domainconfig.Database, no
 	}
 	defer client.Close()
 
+	// 确保远端工作目录存在。
 	if err := client.EnsureDir(database.WorkPath); err != nil {
 		emit(domainruntime.StepFailed, err.Error(), "-", true)
 		return err
 	}
 
+	// 获取远端目录锁，避免多个实例并发写同一个工作目录。
 	lockName, lockPath, err := s.acquireLock(ctx, client, database, emit)
 	if err != nil {
 		emit(domainruntime.StepFailed, err.Error(), "-", true)
 		return err
 	}
 
+	// releaseLock 负责在流程结束时清理业务锁。
 	lockHeld := true
 	releaseLock := func() error {
 		if !lockHeld {
@@ -161,36 +184,43 @@ func (s *Service) runOne(ctx context.Context, database domainconfig.Database, no
 		}
 	}()
 
+	// 删除远端历史 SQL 文件，避免旧脚本干扰本次执行。
 	if err := s.removeRemoteSQLFiles(client, database, emit); err != nil {
 		emit(domainruntime.StepFailed, err.Error(), "-", true)
 		return err
 	}
 
+	// 上传所有文件，并在上传时同步计算本地 xxHash3。
 	if err := s.uploadArtifacts(client, artifacts, emit); err != nil {
 		emit(domainruntime.StepFailed, err.Error(), "-", true)
 		return err
 	}
 
+	// 统一计算远端文件哈希并与本地上传时产生的哈希对比。
 	if err := s.verifyArtifactsXXH3(client, artifacts, emit); err != nil {
 		emit(domainruntime.StepFailed, err.Error(), "-", true)
 		return err
 	}
 
+	// 读取该数据库类型对应的执行脚本名。
 	scriptName, err := database.ShellScriptName()
 	if err != nil {
 		emit(domainruntime.StepFailed, err.Error(), "-", true)
 		return err
 	}
 
+	// 给脚本加执行权限。
 	chmodCommand := fmt.Sprintf("cd %s && chmod 555 %s", shellQuote(database.WorkPath), shellQuote(scriptName))
 	if err := client.RunCommand(ctx, chmodCommand); err != nil {
 		emit(domainruntime.StepFailed, err.Error(), "-", true)
 		return err
 	}
 
+	// 组装最终执行命令。
 	command := buildExecutionCommand(database, scriptName)
 	logger.Info("执行远程脚本命令", "命令", command)
 
+	// 执行远程脚本并下载日志。
 	execErr := s.runRemoteScript(ctx, client, scriptName, command, emit)
 	downloadErr := s.downloadRemoteLog(client, database, emit)
 
@@ -218,12 +248,16 @@ func (s *Service) runOne(ctx context.Context, database domainconfig.Database, no
 	return nil
 }
 
-// acquireLock 通过“协调锁 + 业务锁”两段式协议，实现远程目录锁的原子争抢。
+// acquireLock 通过“协调锁 + 业务锁”两阶段协议实现远程目录锁。
 func (s *Service) acquireLock(ctx context.Context, client *remote.Client, database domainconfig.Database, emit func(domainruntime.Step, string, string, bool)) (string, string, error) {
+	// guardName 是协调阶段使用的临时文件名。
 	guardName := ".sqlturbo_lock_guard"
+	// guardPath 是协调锁文件的完整路径。
 	guardPath := path.Join(database.WorkPath, guardName)
+	// waitStartedAt 记录当前等待阶段的起始时间。
 	waitStartedAt := time.Time{}
 
+	// waitAndEmit 在等待锁释放时持续刷新进度。
 	waitAndEmit := func(message string) error {
 		if waitStartedAt.IsZero() {
 			waitStartedAt = time.Now()
@@ -233,9 +267,11 @@ func (s *Service) acquireLock(ctx context.Context, client *remote.Client, databa
 		})
 	}
 
+	// 尝试抢占协调锁，直到成功或超出重试次数。
 	for attempt := 0; ; attempt++ {
 		emit(domainruntime.StepAcquireLock, "正在检查远程锁文件", "-", false)
 
+		// 先创建协调锁文件，避免多个实例同时进入下一步。
 		guardCreated, err := client.CreateExclusiveFile(guardPath, s.snapshot.LockContent())
 		if err != nil {
 			return "", "", err
@@ -263,12 +299,17 @@ func (s *Service) acquireLock(ctx context.Context, client *remote.Client, databa
 			}
 		}
 
+		// 如果目录里没有业务锁，说明当前可以创建新的执行锁。
 		if len(lockFiles) == 0 {
+			// 生成一个唯一的业务锁名。
 			lockName := "lock_" + time.Now().Format("20060102150405000")
+			// 业务锁的完整路径。
 			lockPath := path.Join(database.WorkPath, lockName)
 
 			emit(domainruntime.StepCreateLock, "正在创建锁["+lockName+"]", "-", false)
+			// 创建业务锁。
 			lockCreated, err := client.CreateExclusiveFile(lockPath, s.snapshot.LockContent())
+			// 无论创建成功与否，都先移除协调锁。
 			guardRemoveErr := client.RemoveFile(guardPath)
 			if err != nil {
 				return "", "", err
@@ -288,6 +329,7 @@ func (s *Service) acquireLock(ctx context.Context, client *remote.Client, databa
 			return lockName, lockPath, nil
 		}
 
+		// 仍然存在业务锁，说明当前需要等待。
 		_ = client.RemoveFile(guardPath)
 
 		if attempt >= s.app.RetryTimes {
@@ -329,7 +371,7 @@ func formatElapsedSeconds(startedAt time.Time) string {
 	return fmt.Sprintf("%ds", int(time.Since(startedAt).Seconds()))
 }
 
-// removeRemoteSQLFiles 删除远程工作目录中的历史 SQL 文件。
+// removeRemoteSQLFiles 删除远程工作目录下的历史 SQL 文件。
 func (s *Service) removeRemoteSQLFiles(client *remote.Client, database domainconfig.Database, emit func(domainruntime.Step, string, string, bool)) error {
 	emit(domainruntime.StepDeleteHistory, "正在删除远程历史SQL脚本", "-", false)
 
@@ -349,71 +391,64 @@ func (s *Service) removeRemoteSQLFiles(client *remote.Client, database domaincon
 	return nil
 }
 
-func (s *Service) prepareUploadArtifacts(database domainconfig.Database, localSQLFiles []string, profileFiles []infraAssets.ProfileFile, emit func(domainruntime.Step, string, string, bool)) ([]uploadArtifact, error) {
+// buildUploadArtifacts 只组装待上传文件列表，不在这里预先计算哈希。
+func (s *Service) buildUploadArtifacts(database domainconfig.Database, localSQLFiles []string, profileFiles []infraAssets.ProfileFile) ([]uploadArtifact, error) {
 	total := len(localSQLFiles) + len(profileFiles)
 	if total == 0 {
 		return nil, nil
 	}
 
 	artifacts := make([]uploadArtifact, 0, total)
-	completed := 0
 
 	for _, localPath := range localSQLFiles {
 		fileName := filepath.Base(localPath)
-		emit(domainruntime.StepInitializing, "正在计算本地xxHash3["+fileName+"]", formatPercent(int64(completed), int64(total)), false)
-
-		_, xxh3Text, err := calculateLocalFileXXH3(localPath)
-		if err != nil {
-			return nil, err
-		}
-
 		artifacts = append(artifacts, uploadArtifact{
 			name:       fileName,
 			remotePath: path.Join(database.WorkPath, fileName),
 			localPath:  localPath,
 			fromMemory: false,
-			localXXH3:  xxh3Text,
 		})
-		completed++
 	}
 
 	for _, profileFile := range profileFiles {
-		content := normalizeScriptContent(profileFile.Content)
-		emit(domainruntime.StepInitializing, "正在计算本地xxHash3["+profileFile.Name+"]", formatPercent(int64(completed), int64(total)), false)
-
 		artifacts = append(artifacts, uploadArtifact{
 			name:       profileFile.Name,
 			remotePath: path.Join(database.WorkPath, profileFile.Name),
-			content:    content,
+			content:    normalizeScriptContent(profileFile.Content),
 			fromMemory: true,
-			localXXH3:  calculateBytesXXH3(content),
 		})
-		completed++
 	}
 
-	emit(domainruntime.StepInitializing, "本地xxHash3计算完成", "100%", false)
 	return artifacts, nil
 }
 
+// uploadArtifacts 按顺序上传所有待处理文件，并把上传时计算出的本地哈希写回 artifact。
 func (s *Service) uploadArtifacts(client *remote.Client, artifacts []uploadArtifact, emit func(domainruntime.Step, string, string, bool)) error {
-	for _, artifact := range artifacts {
-		var err error
-		if artifact.fromMemory {
-			err = client.UploadContent(artifact.remotePath, artifact.content, func(written int64, total int64) {
-				emit(domainruntime.StepUploading, "正在上传["+artifact.name+"]", formatPercent(written, total), false)
+	for index := range artifacts {
+		var (
+			hashResult remote.UploadResult
+			err        error
+		)
+
+		if artifacts[index].fromMemory {
+			hashResult, err = client.UploadContentWithHash(artifacts[index].remotePath, artifacts[index].content, func(written int64, total int64) {
+				emit(domainruntime.StepUploading, "正在上传并计算哈希["+artifacts[index].name+"]", formatPercent(written, total), false)
 			})
 		} else {
-			err = client.UploadFile(artifact.localPath, artifact.remotePath, func(written int64, total int64) {
-				emit(domainruntime.StepUploading, "正在上传["+artifact.name+"]", formatPercent(written, total), false)
+			hashResult, err = client.UploadFileWithHash(artifacts[index].localPath, artifacts[index].remotePath, func(written int64, total int64) {
+				emit(domainruntime.StepUploading, "正在上传并计算哈希["+artifacts[index].name+"]", formatPercent(written, total), false)
 			})
 		}
 		if err != nil {
 			return err
 		}
+
+		artifacts[index].localXXH3 = hashResult.LocalXXH3
 	}
 	return nil
 }
 
+// verifyArtifactsXXH3 统一读取远端文件并对比本地上传时产生的 xxHash3。
 func (s *Service) verifyArtifactsXXH3(client *remote.Client, artifacts []uploadArtifact, emit func(domainruntime.Step, string, string, bool)) error {
 	for _, artifact := range artifacts {
 		remoteXXH3, err := client.ComputeRemoteXXH3(artifact.remotePath, func(written int64, total int64) {
@@ -430,39 +465,12 @@ func (s *Service) verifyArtifactsXXH3(client *remote.Client, artifacts []uploadA
 	return nil
 }
 
+// normalizeScriptContent 统一 profile 文件的编码和换行格式。
 func normalizeScriptContent(content []byte) []byte {
 	content = bytes.TrimPrefix(content, []byte{0xEF, 0xBB, 0xBF})
 	content = bytes.ReplaceAll(content, []byte("\r\n"), []byte("\n"))
 	content = bytes.ReplaceAll(content, []byte("\r"), []byte("\n"))
 	return content
-}
-
-func calculateLocalFileXXH3(localPath string) (int64, string, error) {
-	file, err := os.Open(localPath)
-	if err != nil {
-		return 0, "", fmt.Errorf("打开本地文件失败：%w", err)
-	}
-	defer file.Close()
-
-	info, err := file.Stat()
-	if err != nil {
-		return 0, "", fmt.Errorf("读取本地文件信息失败：%w", err)
-	}
-
-	hash := xxh3.New()
-	if _, err := io.Copy(hash, file); err != nil {
-		return 0, "", fmt.Errorf("计算本地文件xxHash3失败：%w", err)
-	}
-
-	return info.Size(), formatXXH3(hash.Sum64()), nil
-}
-
-func calculateBytesXXH3(content []byte) string {
-	return formatXXH3(xxh3.Hash(content))
-}
-
-func formatXXH3(sum uint64) string {
-	return fmt.Sprintf("%016x", sum)
 }
 
 // runRemoteScript 执行远程脚本并按秒刷新执行耗时。
